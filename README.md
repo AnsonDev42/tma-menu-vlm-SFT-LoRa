@@ -31,7 +31,8 @@ tma/
 For that layout:
 
 ```bash
-export MENU_DATASET_PATH="$(git rev-parse --show-toplevel)/.local/menu-training-data"
+export TMA_WORKSPACE=/workspace/tma
+export MENU_DATASET_PATH="$TMA_WORKSPACE/.local/menu-training-data"
 ```
 
 ## Status

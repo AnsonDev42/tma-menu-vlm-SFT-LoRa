@@ -90,7 +90,7 @@ class Metadata(StrictModel):
 
 
 class ReleaseRecord(StrictModel):
-    document_id: str
+    document_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
     kind: Literal["source_reference", "silver_augmented"]
     split: Literal["train", "validation", "test"] | None = None
     image: ImageRef

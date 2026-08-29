@@ -97,6 +97,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             args.output,
             dataset_sha256=args.dataset_sha256,
             checkpoint=args.checkpoint,
+            gate_store=args.gate_store,
             luna_predictions=args.luna_predictions,
         )
     if args.command == "bundle":
@@ -171,7 +172,8 @@ def _parser() -> argparse.ArgumentParser:
     test = commands.add_parser("evaluate-test")
     _evaluation_args(test)
     test.add_argument("--dataset-sha256", required=True)
-    test.add_argument("--checkpoint", required=True)
+    test.add_argument("--checkpoint", type=Path, required=True)
+    test.add_argument("--gate-store", type=Path, required=True)
 
     bundle = commands.add_parser("bundle")
     bundle.add_argument("--run-root", type=Path, required=True)

@@ -13,25 +13,18 @@
   "lora_rank": 16,
   "lora_alpha": 32,
   "lora_dropout": 0.05,
-  "target_modules": [
-    "q_proj",
-    "k_proj",
-    "v_proj",
-    "o_proj",
-    "gate_proj",
-    "up_proj",
-    "down_proj",
-    "linear_fc1",
-    "linear_fc2"
-  ],
-  "required_target_families": {
-    "language": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-    "projector": ["linear_fc1", "linear_fc2"]
+  "target_module_selectors": {
+    "language": {
+      "prefix": "model.language_model.",
+      "suffixes": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    },
+    "projector": {
+      "exact": ["model.visual.merger.linear_fc1", "model.visual.merger.linear_fc2"]
+    }
   },
-  "forbidden_target_prefixes": ["visual.blocks", "visual.patch_embed"],
   "freeze_vision_tower": true,
   "max_length": null,
-  "assistant_only_loss": true,
+  "completion_only_loss": true,
   "gradient_checkpointing": true,
   "early_stopping_patience": 1,
   "selection": ["structural_f1:max", "item_f1:max", "eval_loss:min"]

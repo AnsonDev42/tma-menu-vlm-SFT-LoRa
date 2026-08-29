@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from menu_vlm.evaluation import evaluate_files, select_checkpoint
+from menu_vlm.evaluation import evaluate_files, evaluate_test_once, select_checkpoint
 
 REFERENCE = {
     "s": [
@@ -100,3 +100,102 @@ def test_checkpoint_selection_uses_declared_lexicographic_policy(tmp_path: Path)
     selection = select_checkpoint(metrics)
     assert selection["selected_checkpoint"] == "checkpoint-3"
     assert selection["policy"] == ["structural_f1:max", "item_f1:max", "eval_loss:min"]
+
+
+def test_printed_notes_are_order_insensitive_but_text_and_ownership_affect_structure(
+    tmp_path: Path,
+) -> None:
+    reference = json.loads(json.dumps(REFERENCE))
+    reference["s"][0]["notes"] = [
+        {"t": "Dinner only", "l": [4]},
+        {"t": "Ask about allergens", "l": [7]},
+    ]
+    reference["i"][0]["notes"] = [{"t": "Best served rare", "l": [3]}]
+    reference["i"][1]["notes"] = [{"t": "Gluten free", "l": [8]}]
+    references = tmp_path / "references.jsonl"
+    write_jsonl(
+        references,
+        [{"example_id": "a", "ocr_line_count": 8, "target": reference, "kind": "primary"}],
+    )
+
+    reordered = json.loads(json.dumps(reference))
+    reordered["s"].reverse()
+    reordered["s"][1]["notes"].reverse()
+    reordered["i"].reverse()
+    predictions = tmp_path / "reordered.jsonl"
+    write_jsonl(predictions, [{"example_id": "a", "prediction": reordered}])
+    exact = evaluate_files(references, predictions)
+    assert exact["note_f1"] == 1.0
+    assert exact["note_text_accuracy"] == 1.0
+    assert exact["note_ownership_accuracy"] == 1.0
+    assert exact["structural_f1"] == 1.0
+
+    wrong = json.loads(json.dumps(reference))
+    wrong["s"][0]["notes"][0]["t"] = "Lunch only"
+    moved = wrong["i"][0]["notes"].pop()
+    wrong["i"][1]["notes"].append(moved)
+    wrong_predictions = tmp_path / "wrong.jsonl"
+    write_jsonl(wrong_predictions, [{"example_id": "a", "prediction": wrong}])
+    degraded = evaluate_files(references, wrong_predictions)
+    assert degraded["note_f1"] == 1.0
+    assert degraded["note_text_accuracy"] < 1.0
+    assert degraded["note_ownership_accuracy"] < 1.0
+    assert degraded["structural_f1"] < 1.0
+
+    missing = json.loads(json.dumps(reference))
+    missing["s"][0]["notes"].pop()
+    missing_predictions = tmp_path / "missing.jsonl"
+    write_jsonl(missing_predictions, [{"example_id": "a", "prediction": missing}])
+    missing_metrics = evaluate_files(references, missing_predictions)
+    assert missing_metrics["note_recall"] < 1.0
+    assert missing_metrics["structural_f1"] < 1.0
+
+
+def test_frozen_test_gate_is_bound_to_dataset_model_and_adapter_not_output_path(
+    tmp_path: Path,
+) -> None:
+    references = tmp_path / "references.jsonl"
+    predictions = tmp_path / "predictions.jsonl"
+    write_jsonl(
+        references,
+        [{"example_id": "a", "ocr_line_count": 6, "target": REFERENCE, "kind": "primary"}],
+    )
+    write_jsonl(predictions, [{"example_id": "a", "prediction": REFERENCE}])
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}\n", encoding="utf-8")
+    (adapter / "adapter_model.safetensors").write_bytes(b"synthetic adapter A")
+    gate_store = tmp_path / "fixed-test-gates"
+
+    evaluate_test_once(
+        references,
+        predictions,
+        tmp_path / "first-metrics.json",
+        dataset_sha256="a" * 64,
+        checkpoint=adapter,
+        gate_store=gate_store,
+    )
+
+    with pytest.raises(FileExistsError, match="already consumed"):
+        evaluate_test_once(
+            references,
+            predictions,
+            tmp_path / "different-output.json",
+            dataset_sha256="a" * 64,
+            checkpoint=adapter,
+            gate_store=gate_store,
+        )
+
+    other_adapter = tmp_path / "other-adapter"
+    other_adapter.mkdir()
+    (other_adapter / "adapter_config.json").write_text("{}\n", encoding="utf-8")
+    (other_adapter / "adapter_model.safetensors").write_bytes(b"synthetic adapter B")
+    evaluate_test_once(
+        references,
+        predictions,
+        tmp_path / "other-checkpoint-metrics.json",
+        dataset_sha256="a" * 64,
+        checkpoint=other_adapter,
+        gate_store=gate_store,
+    )
+    assert len(list(gate_store.glob("*.json"))) == 2

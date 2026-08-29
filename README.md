@@ -17,8 +17,8 @@ checkpoints must remain outside Git.
 - Revision: `ebb281ec70b05090aa6165b016eac8ec08e71b17`
 - Prompt: `menu-v2-vision-v1`, byte-for-byte TMA production system/user shape
 - Training: seeded BF16 LoRA; one controlled 4-bit QLoRA fallback after OOM
-- Vision policy: vision blocks frozen; LoRA targets the multimodal merger and
-  language attention/MLP modules
+- Vision policy: vision blocks frozen; loaded language attention/MLP and exact
+  multimodal merger modules are resolved to exact PEFT targets
 - Split policy: preserve an immutable release's assignments; only explicitly
   unsplit generic input may be split, deterministically by restaurant with
   canonical-source fallback
@@ -89,8 +89,10 @@ uv run menu-vlm train --config configs/qwen3-vl-4b-lora.json \
 
 Executable prediction/evaluation commands are in
 [docs/training-and-evaluation.md](docs/training-and-evaluation.md). Selection is
-validation-only: structural F1, item F1, then loss. `evaluate-test` creates a
-durable once-only gate and refuses a second run.
+validation-only: structural F1 (including printed note text and ownership), item
+F1, then loss. `evaluate-test` uses a fixed gate store keyed to dataset, pinned
+model revision, and adapter content; changing an output filename cannot consume
+the same frozen test twice.
 
 ## Runpod and returned artifacts
 

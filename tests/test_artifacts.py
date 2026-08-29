@@ -12,6 +12,18 @@ from menu_vlm.artifacts import (
 
 
 def test_artifact_bundle_and_transfer_archive_round_trip(tmp_path: Path) -> None:
+    assert {
+        "checkpoint_candidates",
+        "selected_validation_predictions",
+        "selected_validation_metrics",
+        "robustness_validation_predictions",
+        "robustness_validation_metrics",
+        "test_predictions",
+        "test_metrics",
+        "robustness_test_predictions",
+        "robustness_test_metrics",
+        "test_gate",
+    }.issubset(REQUIRED_ARTIFACT_ROLES)
     run = tmp_path / "run"
     run.mkdir()
     roles = {}

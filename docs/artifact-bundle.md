@@ -9,8 +9,11 @@ The return bundle is adapter-only and must contain exactly these roles:
 | `dependency_lock`, `training_config` | Exact software and run configuration |
 | `dataset_manifest` | Private-free release/split hashes and prompt provenance |
 | `training_logs` | Loss, stop, and failure history |
-| `checkpoint_selection` | Structural F1 -> item F1 -> loss rationale |
-| `predictions`, `metrics` | Frozen audit predictions and order-insensitive report |
+| `checkpoint_candidates`, `checkpoint_selection` | Every candidate and structural F1 -> item F1 -> loss rationale |
+| `selected_validation_predictions`, `selected_validation_metrics` | Canonical selected-checkpoint validation evidence |
+| `robustness_validation_predictions`, `robustness_validation_metrics` | Held-out validation derivative evidence |
+| `test_predictions`, `test_metrics`, `test_gate` | Frozen primary test evidence and durable identity gate |
+| `robustness_test_predictions`, `robustness_test_metrics` | Held-out test derivative evidence |
 | `hardware`, `commands` | GPU/runtime facts and replay commands |
 
 The artifact spec also requires model ID/revision, dataset SHA-256, seed, hardware,

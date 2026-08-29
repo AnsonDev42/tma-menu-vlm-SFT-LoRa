@@ -67,6 +67,15 @@ def test_compiler_rejects_checksum_drift_and_lineage_leakage(tmp_path: Path) -> 
         compile_release(CompileOptions(release=leaked, output=tmp_path / "out-leaked"))
 
 
+def test_release_validator_rejects_unhashed_extra_inventory(tmp_path: Path) -> None:
+    release = tmp_path / "release"
+    create_synthetic_release(release)
+    (release / "unhashed-extra.txt").write_text("not in immutable inventory\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="inventory"):
+        compile_release(CompileOptions(release=release, output=tmp_path / "compiled"))
+
+
 def test_compiled_validator_rejects_checksum_drift(tmp_path: Path) -> None:
     release = tmp_path / "release"
     create_synthetic_release(release)
@@ -100,6 +109,25 @@ def test_compiler_rejects_invalid_ocr_reference_without_silent_loss(tmp_path: Pa
     assert manifest["accounting"]["input_records"] == (
         manifest["accounting"]["compiled_records"] + manifest["counts"]["projection_failures"]
     )
+
+
+def test_compiler_rejects_traversal_document_id_before_creating_output(tmp_path: Path) -> None:
+    release = tmp_path / "release"
+    create_synthetic_release(release)
+    records = read_json(release / "records.json")
+    records[0]["document_id"] = "../../escaped"
+    (release / "records.json").write_text(
+        json.dumps(records, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    _rehash_manifest(release)
+    output = tmp_path / "compiled"
+
+    with pytest.raises(ValueError, match="document_id"):
+        compile_release(CompileOptions(release=release, output=output))
+
+    assert not output.exists()
+    assert not (tmp_path / "escaped.svg").exists()
 
 
 def test_unsplit_mode_is_deterministic_and_groups_derivatives(tmp_path: Path) -> None:

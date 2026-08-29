@@ -7,7 +7,8 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from .jsonio import read_jsonl, write_json
+from .constants import MODEL_ID, MODEL_REVISION
+from .jsonio import canonical_json, read_jsonl, sha256_file, sha256_json, write_json
 from .schemas import CompactItem, CompactOutput, CompactSection, validate_compact_output
 
 
@@ -30,6 +31,19 @@ class _Totals:
     reference_ocr_lines: int = 0
     predicted_ocr_lines: int = 0
     matching_ocr_lines: int = 0
+    reference_notes: int = 0
+    predicted_notes: int = 0
+    matched_notes: int = 0
+    matching_note_text: int = 0
+    matching_note_ownership: int = 0
+
+
+@dataclass(frozen=True)
+class _NoteEntity:
+    text: str
+    line_indices: tuple[int, ...]
+    owner_type: str
+    owner_index: int
 
 
 def evaluate_files(
@@ -125,28 +139,70 @@ def evaluate_test_once(
     output: Path,
     *,
     dataset_sha256: str,
-    checkpoint: str,
+    checkpoint: Path,
+    gate_store: Path,
     luna_predictions: Path | None = None,
 ) -> dict[str, Any]:
-    gate = output.with_suffix(output.suffix + ".once.json")
-    if gate.exists() or output.exists():
-        raise FileExistsError(
-            f"Frozen test gate already consumed ({gate} or {output}); "
-            "create a new release/run instead"
-        )
+    if len(dataset_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in dataset_sha256
+    ):
+        raise ValueError("dataset_sha256 must be a lowercase SHA-256 digest")
+    checkpoint_sha256 = _directory_sha256(checkpoint)
+    identity = {
+        "dataset_sha256": dataset_sha256,
+        "model_id": MODEL_ID,
+        "model_revision": MODEL_REVISION,
+        "checkpoint_sha256": checkpoint_sha256,
+    }
+    identity_sha256 = sha256_json(identity)
+    gates = gate_store.resolve()
+    gates.mkdir(parents=True, exist_ok=True)
+    gate = gates / f"{identity_sha256}.json"
+    if output.exists():
+        raise FileExistsError(f"Frozen test output already exists: {output}")
     metrics = evaluate_files(references, predictions, luna_predictions_path=luna_predictions)
+    gate_payload = {
+        "schema_version": "1.0",
+        "identity": identity,
+        "identity_sha256": identity_sha256,
+        "reference_sha256": sha256_file(references),
+        "prediction_sha256": sha256_file(predictions),
+        "luna_prediction_sha256": (
+            sha256_file(luna_predictions) if luna_predictions is not None else None
+        ),
+        "status": "reserved",
+    }
+    try:
+        with gate.open("x", encoding="utf-8") as stream:
+            stream.write(canonical_json(gate_payload) + "\n")
+    except FileExistsError as exc:
+        raise FileExistsError(
+            "Frozen test identity was already consumed for this dataset, model, and adapter"
+        ) from exc
     write_json(output, metrics)
-    write_json(
-        gate,
-        {
-            "schema_version": "1.0",
-            "dataset_sha256": dataset_sha256,
-            "checkpoint": checkpoint,
-            "reference_file": references.name,
-            "prediction_file": predictions.name,
-        },
-    )
+    gate_payload["status"] = "completed"
+    gate_payload["metrics_sha256"] = sha256_file(output)
+    write_json(gate, gate_payload)
+    metrics["frozen_test_gate"] = {
+        "identity_sha256": identity_sha256,
+        "checkpoint_sha256": checkpoint_sha256,
+        "path": str(gate),
+    }
     return metrics
+
+
+def _directory_sha256(path: Path) -> str:
+    root = path.resolve()
+    if not root.is_dir():
+        raise ValueError(f"Checkpoint is not a directory: {root}")
+    required = ("adapter_config.json", "adapter_model.safetensors")
+    hashes = {}
+    for name in required:
+        candidate = root / name
+        if not candidate.is_file():
+            raise ValueError(f"Checkpoint is missing identity file: {name}")
+        hashes[name] = sha256_file(candidate)
+    return sha256_json(hashes)
 
 
 def _evaluate_rows(
@@ -167,6 +223,8 @@ def _evaluate_one(
     totals.reference_items += len(reference.items)
     totals.reference_sections += len(reference.sections)
     totals.reference_ocr_lines += len(_claimed_lines(reference))
+    reference_notes = _notes(reference)
+    totals.reference_notes += len(reference_notes)
     raw = prediction_row.get("prediction")
     parseable = True
     if isinstance(raw, str):
@@ -237,6 +295,26 @@ def _evaluate_one(
             )
     totals.matching_names += matching_names
     totals.matching_sections += matching_sections
+    predicted_notes = _notes(prediction)
+    note_pairs = _match_notes(reference_notes, predicted_notes)
+    item_map = {
+        prediction_index: reference_index for reference_index, prediction_index in item_pairs
+    }
+    matching_note_text = 0
+    matching_note_ownership = 0
+    for reference_index, prediction_index in note_pairs:
+        expected_note = reference_notes[reference_index]
+        actual_note = predicted_notes[prediction_index]
+        matching_note_text += _normalize(expected_note.text) == _normalize(actual_note.text)
+        owner_map = section_map if actual_note.owner_type == "section" else item_map
+        matching_note_ownership += (
+            expected_note.owner_type == actual_note.owner_type
+            and owner_map.get(actual_note.owner_index) == expected_note.owner_index
+        )
+    totals.predicted_notes += len(predicted_notes)
+    totals.matched_notes += len(note_pairs)
+    totals.matching_note_text += matching_note_text
+    totals.matching_note_ownership += matching_note_ownership
     merge_errors, split_errors = _structural_errors(reference.items, prediction.items)
     totals.merge_errors += merge_errors
     totals.split_errors += split_errors
@@ -248,6 +326,9 @@ def _evaluate_one(
         "matched_sections": len(section_pairs),
         "matching_names": matching_names,
         "matching_section_assignments": matching_sections,
+        "matched_notes": len(note_pairs),
+        "matching_note_text": matching_note_text,
+        "matching_note_ownership": matching_note_ownership,
         "merge_errors": merge_errors,
         "split_errors": split_errors,
     }
@@ -265,7 +346,21 @@ def _summarize(totals: _Totals) -> dict[str, Any]:
     )
     section_accuracy = _ratio(totals.matching_sections, totals.matched_items)
     name_accuracy = _ratio(totals.matching_names, totals.matched_items)
-    structural_f1 = statistics.fmean((item_f1, section_f1, section_accuracy))
+    note_precision, note_recall, note_f1 = _prf(
+        totals.matched_notes, totals.predicted_notes, totals.reference_notes
+    )
+    note_text_accuracy = _ratio(totals.matching_note_text, totals.matched_notes)
+    note_ownership_accuracy = _ratio(totals.matching_note_ownership, totals.matched_notes)
+    structural_f1 = statistics.fmean(
+        (
+            item_f1,
+            section_f1,
+            section_accuracy,
+            note_f1,
+            note_text_accuracy,
+            note_ownership_accuracy,
+        )
+    )
     return {
         "document_count": totals.documents,
         "parseable_rate": _ratio(totals.parseable, totals.documents),
@@ -282,6 +377,11 @@ def _summarize(totals: _Totals) -> dict[str, Any]:
         "section_f1": section_f1,
         "section_accuracy": section_accuracy,
         "dish_name_accuracy": name_accuracy,
+        "note_precision": note_precision,
+        "note_recall": note_recall,
+        "note_f1": note_f1,
+        "note_text_accuracy": note_text_accuracy,
+        "note_ownership_accuracy": note_ownership_accuracy,
         "structural_f1": structural_f1,
         "merge_errors": totals.merge_errors,
         "split_errors": totals.split_errors,
@@ -314,6 +414,44 @@ def _match_items(
             overlap = _jaccard(set(reference.line_indices), set(prediction.line_indices))
             score = 0.65 * overlap + (0.35 if name else 0.0)
             if name or overlap > 0:
+                candidates.append((score, left, right))
+    return _greedy_pairs(candidates)
+
+
+def _notes(output: CompactOutput) -> list[_NoteEntity]:
+    section_notes = [
+        _NoteEntity(
+            text=note.text,
+            line_indices=tuple(note.line_indices),
+            owner_type="section",
+            owner_index=section_index,
+        )
+        for section_index, section in enumerate(output.sections)
+        for note in section.notes
+    ]
+    item_notes = [
+        _NoteEntity(
+            text=note.text,
+            line_indices=tuple(note.line_indices),
+            owner_type="item",
+            owner_index=item_index,
+        )
+        for item_index, item in enumerate(output.items)
+        for note in item.notes
+    ]
+    return section_notes + item_notes
+
+
+def _match_notes(
+    references: list[_NoteEntity], predictions: list[_NoteEntity]
+) -> list[tuple[int, int]]:
+    candidates = []
+    for left, reference in enumerate(references):
+        for right, prediction in enumerate(predictions):
+            text_matches = _normalize(reference.text) == _normalize(prediction.text)
+            overlap = _jaccard(set(reference.line_indices), set(prediction.line_indices))
+            score = 0.6 * overlap + (0.4 if text_matches else 0.0)
+            if text_matches or overlap > 0:
                 candidates.append((score, left, right))
     return _greedy_pairs(candidates)
 

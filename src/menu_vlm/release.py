@@ -45,6 +45,18 @@ def validate_release(path: Path, *, allow_unsplit: bool = False) -> ValidatedRel
         raise ValueError(
             f"Release manifest does not hash required files: {sorted(required - set(hashes))}"
         )
+    actual_inventory = {
+        str(candidate.relative_to(root))
+        for candidate in root.rglob("*")
+        if candidate.is_file() and candidate != manifest_path
+    }
+    if set(hashes) != actual_inventory:
+        missing = sorted(actual_inventory - set(hashes))
+        absent = sorted(set(hashes) - actual_inventory)
+        raise ValueError(
+            "Release immutable inventory mismatch; "
+            f"unhashed={missing}, declared_but_absent={absent}"
+        )
     for relative, expected in sorted(hashes.items()):
         if not isinstance(relative, str) or not isinstance(expected, str):
             raise ValueError("Release hashes must map paths to SHA-256 strings")

@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_dir/lib.sh"
+
 if [[ $# -ne 2 ]]; then
-  echo "usage: $0 REMOTE_ROOT ARCHIVE_NAME" >&2
-  exit 2
+  runpod_die "usage: $0 REMOTE_ROOT ARCHIVE_NAME"
 fi
 remote_root="$1"
 archive_name="$2"
-if [[ ! "$remote_root" =~ ^/workspace/[A-Za-z0-9._/-]+$ ]] || [[ "$remote_root" == *".."* ]] || \
-  [[ ! "$archive_name" =~ ^[A-Za-z0-9._-]+$ ]]; then
-  echo "unsafe remote root or archive name" >&2
-  exit 2
-fi
+validate_remote_root "$remote_root"
+validate_archive_name "$archive_name"
 project="$remote_root/project"
 archive="$remote_root/incoming/$archive_name"
 dataset="$remote_root/private-dataset"
@@ -78,6 +77,12 @@ selected="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sel
 cp -a "$selected" "$run/selected-adapter"
 
 uv run menu-vlm predict --config "$config" --dataset "$dataset" \
+  --split-file validation.jsonl --adapter "$run/selected-adapter" \
+  --output "$run/evaluations/selected.validation.predictions.jsonl"
+uv run menu-vlm evaluate --references "$dataset/validation.jsonl" \
+  --predictions "$run/evaluations/selected.validation.predictions.jsonl" \
+  --output "$run/evaluations/selected.validation.metrics.json"
+uv run menu-vlm predict --config "$config" --dataset "$dataset" \
   --split-file robustness_validation.jsonl --adapter "$run/selected-adapter" \
   --output "$run/evaluations/robustness-validation.predictions.jsonl"
 uv run menu-vlm evaluate --references "$dataset/robustness_validation.jsonl" \
@@ -86,12 +91,24 @@ uv run menu-vlm evaluate --references "$dataset/robustness_validation.jsonl" \
 uv run menu-vlm predict --config "$config" --dataset "$dataset" --split-file test.jsonl \
   --adapter "$run/selected-adapter" --output "$run/test.predictions.jsonl"
 dataset_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["dataset_sha256"])' "$dataset/manifest.json")"
+gate_store="$remote_root/frozen-test-gates"
 test_args=(evaluate-test --references "$dataset/test.jsonl" --predictions "$run/test.predictions.jsonl"
-  --output "$run/test.metrics.json" --dataset-sha256 "$dataset_sha" --checkpoint "$selected")
+  --output "$run/test.metrics.json" --dataset-sha256 "$dataset_sha"
+  --checkpoint "$run/selected-adapter" --gate-store "$gate_store")
 if [[ -n "${LUNA_TEST_PREDICTIONS:-}" ]]; then
   test_args+=(--luna-predictions "$LUNA_TEST_PREDICTIONS")
 fi
 uv run menu-vlm "${test_args[@]}"
+test_gate="$(find "$gate_store" -maxdepth 1 -type f -name '*.json' -print)"
+[[ -f "$test_gate" && "$(find "$gate_store" -maxdepth 1 -type f -name '*.json' | wc -l)" -eq 1 ]] || \
+  { echo "expected exactly one frozen test gate" >&2; exit 1; }
+cp "$test_gate" "$run/test-gate.json"
+uv run menu-vlm predict --config "$config" --dataset "$dataset" \
+  --split-file robustness_test.jsonl --adapter "$run/selected-adapter" \
+  --output "$run/evaluations/robustness-test.predictions.jsonl"
+uv run menu-vlm evaluate --references "$dataset/robustness_test.jsonl" \
+  --predictions "$run/evaluations/robustness-test.predictions.jsonl" \
+  --output "$run/evaluations/robustness-test.metrics.json"
 
 cp "$project/uv.lock" "$run/repro/uv.lock"
 cp "$config" "$run/repro/training-config.json"
@@ -110,7 +127,15 @@ spec={"schema_version":"1.0","model_id":"Qwen/Qwen3-VL-4B-Instruct",
 "processor_provenance":"repro/processor-provenance.json","dependency_lock":"repro/uv.lock",
 "training_config":"repro/training-config.json","dataset_manifest":"repro/dataset-manifest.json",
 "training_logs":"training.log","checkpoint_selection":"checkpoint-selection.json",
-"predictions":"test.predictions.jsonl","metrics":"test.metrics.json",
+"checkpoint_candidates":"evaluations/checkpoints.jsonl",
+"selected_validation_predictions":"evaluations/selected.validation.predictions.jsonl",
+"selected_validation_metrics":"evaluations/selected.validation.metrics.json",
+"robustness_validation_predictions":"evaluations/robustness-validation.predictions.jsonl",
+"robustness_validation_metrics":"evaluations/robustness-validation.metrics.json",
+"test_predictions":"test.predictions.jsonl","test_metrics":"test.metrics.json",
+"robustness_test_predictions":"evaluations/robustness-test.predictions.jsonl",
+"robustness_test_metrics":"evaluations/robustness-test.metrics.json",
+"test_gate":"test-gate.json",
 "hardware":"hardware.txt","commands":"commands.txt"}}
 json.dump(spec, open(run/"artifact-spec.json","w"), sort_keys=True, separators=(",", ":"))
 PY

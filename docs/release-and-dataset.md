@@ -16,12 +16,15 @@ images/             release-hashed images
 audit/              optional release-hashed source audit
 ```
 
-The validator checks every declared file hash before reading labels. It then
-requires exact identity/count accounting, unique IDs, source/derivative image
+The validator requires the declared hashes to be the exact release file
+inventory (excluding `manifest.json`) and checks every declared file hash before
+reading labels. It then requires exact identity/count accounting, path-safe
+unique IDs, source/derivative image
 hashes, content-preserving lineage, inherited derivative annotations, identical
 source/derivative split assignment, and non-empty source examples in all three
-splits. Unknown files may exist only if the release hashes them; compiled output
-accounts for every generated file.
+splits. Optional files such as audit evidence may exist only when included in
+that exact hashed inventory; unhashed extras and declared-but-absent files fail
+validation. Compiled output likewise accounts for every generated file.
 
 Existing assignments are immutable. `--allow-unsplit` is accepted only for the
 generic `menu-canonical-unsplit-v1` contract used by public fixtures or future

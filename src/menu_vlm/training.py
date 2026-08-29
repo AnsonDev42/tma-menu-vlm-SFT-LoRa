@@ -21,6 +21,8 @@ _DRY_MODULES = (
     "model.visual.merger.linear_fc1",
     "model.visual.merger.linear_fc2",
     "model.visual.blocks.0.attn.qkv",
+    "model.visual.blocks.0.self_attn.q_proj",
+    "model.visual.blocks.0.mlp.linear_fc1",
     "model.visual.patch_embed.proj",
 )
 
@@ -67,6 +69,13 @@ def preflight_config(
         "vision_tower_frozen": config["freeze_vision_tower"],
         "matched_families": target_report["matched_families"],
         "matched_module_count": len(target_report["matched_modules"]),
+        "matched_modules": target_report["matched_modules"],
+        "dataset_format": "conversational_prompt_completion",
+        "loss_scope": "completion_only",
+        "sft_config": {
+            "completion_only_loss": True,
+            "assistant_only_loss": False,
+        },
         "dataset": dataset,
         "installed_training_packages": installed,
         "source": "static pinned Qwen3-VL module profile" if no_download else "loaded model",
@@ -75,34 +84,37 @@ def preflight_config(
 
 def validate_module_targets(config: dict[str, Any], module_names: Iterable[str]) -> dict[str, Any]:
     names = tuple(module_names)
-    targets = tuple(str(target) for target in config["target_modules"])
-    matched = sorted(
+    selectors = config["target_module_selectors"]
+    language = selectors["language"]
+    language_prefix = str(language["prefix"])
+    language_suffixes = tuple(str(suffix) for suffix in language["suffixes"])
+    language_matches = sorted(
         name
         for name in names
-        if any(name == target or name.endswith(f".{target}") for target in targets)
+        if name.startswith(language_prefix)
+        and any(name.endswith(f".{suffix}") for suffix in language_suffixes)
     )
-    missing_targets = [
-        target
-        for target in targets
-        if not any(name == target or name.endswith(f".{target}") for name in names)
+    missing_suffixes = [
+        suffix
+        for suffix in language_suffixes
+        if not any(name.endswith(f".{suffix}") for name in language_matches)
     ]
-    if missing_targets:
-        raise ValueError(f"Configured LoRA targets do not exist in model: {missing_targets}")
-    forbidden = tuple(str(prefix) for prefix in config["forbidden_target_prefixes"])
-    forbidden_matches = [name for name in matched if any(prefix in name for prefix in forbidden)]
+    if missing_suffixes:
+        raise ValueError(f"Configured language LoRA targets do not exist: {missing_suffixes}")
+    projector_targets = tuple(str(name) for name in selectors["projector"]["exact"])
+    projector_matches = sorted(name for name in names if name in projector_targets)
+    missing_projectors = sorted(set(projector_targets) - set(projector_matches))
+    if missing_projectors:
+        raise ValueError(f"Configured projector LoRA targets do not exist: {missing_projectors}")
+    matched = sorted([*language_matches, *projector_matches])
+    forbidden_matches = [
+        name
+        for name in matched
+        if name.startswith("model.visual.") and name not in projector_targets
+    ]
     if forbidden_matches:
         raise ValueError(f"LoRA targets enter the frozen vision tower: {forbidden_matches}")
-    families = config["required_target_families"]
-    matched_families = []
-    for family, suffixes in families.items():
-        if not any(
-            any(name == suffix or name.endswith(f".{suffix}") for name in matched)
-            for suffix in suffixes
-        ):
-            raise ValueError(f"LoRA target family has no loaded module match: {family}")
-        matched_families.append(family)
-    projector_matches = [name for name in matched if "visual.merger" in name]
-    language_matches = [name for name in matched if "language_model" in name]
+    matched_families = ["language", "projector"]
     if not projector_matches or not language_matches:
         raise ValueError("Loaded targets must cover language_model and visual.merger modules")
     return {
@@ -111,6 +123,26 @@ def validate_module_targets(config: dict[str, Any], module_names: Iterable[str])
         "language_modules": language_matches,
         "projector_modules": projector_matches,
     }
+
+
+def validate_peft_target_modules(
+    selected_modules: Iterable[str], targeted_modules: Iterable[str]
+) -> dict[str, Any]:
+    """Prove PEFT injected exactly the resolved loaded-model modules and no suffix collision."""
+    selected = tuple(sorted(set(selected_modules)))
+    targeted = tuple(sorted(set(targeted_modules)))
+    missing = [name for name in selected if not any(actual.endswith(name) for actual in targeted)]
+    unexpected = [
+        actual
+        for actual in targeted
+        if not any(actual == name or actual.endswith(f".{name}") for name in selected)
+    ]
+    if missing or unexpected or len(targeted) != len(selected):
+        raise ValueError(
+            f"PEFT targeted modules diverge from exact selection; missing={missing}, "
+            f"unexpected={unexpected}"
+        )
+    return {"selected": list(selected), "targeted": list(targeted)}
 
 
 def run_training(config_path: Path, dataset_path: Path, output: Path) -> dict[str, Any]:
@@ -139,8 +171,8 @@ def run_training(config_path: Path, dataset_path: Path, output: Path) -> dict[st
     seed = int(config["seed"])
     random.seed(seed)
     set_seed(seed, deterministic=True)
-    train_rows = _trainer_rows(dataset_path, "train.jsonl")
-    validation_rows = _trainer_rows(dataset_path, "validation.jsonl")
+    train_rows = trainer_rows(dataset_path, "train.jsonl")
+    validation_rows = trainer_rows(dataset_path, "validation.jsonl")
     train_dataset = Dataset.from_list(train_rows).cast_column("image", Image())
     validation_dataset = Dataset.from_list(validation_rows).cast_column("image", Image())
 
@@ -166,12 +198,14 @@ def run_training(config_path: Path, dataset_path: Path, output: Path) -> dict[st
         trust_remote_code=False,
     )
     module_report = validate_module_targets(config, (name for name, _ in model.named_modules()))
+    if config["freeze_vision_tower"]:
+        model.model.visual.requires_grad_(False)
     model.config.use_cache = False
     lora = LoraConfig(
         r=int(config["lora_rank"]),
         lora_alpha=int(config["lora_alpha"]),
         lora_dropout=float(config["lora_dropout"]),
-        target_modules=list(config["target_modules"]),
+        target_modules=module_report["matched_modules"],
         bias="none",
         task_type=TaskType.CAUSAL_LM,
     )
@@ -188,7 +222,8 @@ def run_training(config_path: Path, dataset_path: Path, output: Path) -> dict[st
         gradient_checkpointing=bool(config["gradient_checkpointing"]),
         max_length=None,
         packing=False,
-        assistant_only_loss=True,
+        completion_only_loss=True,
+        assistant_only_loss=False,
         bf16=True,
         tf32=True,
         eval_strategy="epoch",
@@ -214,6 +249,17 @@ def run_training(config_path: Path, dataset_path: Path, output: Path) -> dict[st
             _finite_loss_callback(TrainerCallback),
         ],
     )
+    targeted_modules = getattr(trainer.model, "targeted_module_names", ())
+    injection_report = validate_peft_target_modules(
+        module_report["matched_modules"], targeted_modules
+    )
+    trainable_vision = [
+        name
+        for name, parameter in trainer.model.named_parameters()
+        if parameter.requires_grad and ".visual." in name and ".visual.merger." not in name
+    ]
+    if trainable_vision:
+        raise ValueError(f"Frozen vision tower has trainable parameters: {trainable_vision}")
     train_result = trainer.train()
     adapter_path = output / "final-adapter"
     trainer.save_model(str(adapter_path))
@@ -230,6 +276,7 @@ def run_training(config_path: Path, dataset_path: Path, output: Path) -> dict[st
         "processor_path": str(processor_path.relative_to(output)),
         "processor_files_sha256": _directory_hashes(processor_path),
         "module_targets": module_report,
+        "peft_injection": injection_report,
         "train_metrics": train_result.metrics,
         "checkpoint_selection_pending": True,
     }
@@ -272,12 +319,10 @@ def _validated_config(path: Path) -> dict[str, Any]:
         "seed",
         "data_seed",
         "max_epochs",
-        "target_modules",
-        "required_target_families",
-        "forbidden_target_prefixes",
+        "target_module_selectors",
         "freeze_vision_tower",
         "max_length",
-        "assistant_only_loss",
+        "completion_only_loss",
         "gradient_checkpointing",
         "selection",
     }
@@ -292,8 +337,9 @@ def _validated_config(path: Path) -> dict[str, Any]:
     config.setdefault("packing", False)
     if config["packing"] is not False:
         raise ValueError("VLM sequence packing is disabled for the baseline")
-    if not config["assistant_only_loss"]:
-        raise ValueError("Baseline must train on assistant output only")
+    if config["completion_only_loss"] is not True:
+        raise ValueError("Baseline must train on prompt/completion completion-only loss")
+    _validate_target_selectors(config["target_module_selectors"])
     if not config["freeze_vision_tower"]:
         raise ValueError("The first run must freeze the vision tower")
     if not (0 < int(config["max_epochs"]) <= 3):
@@ -303,17 +349,55 @@ def _validated_config(path: Path) -> dict[str, Any]:
     return config
 
 
-def _trainer_rows(dataset_path: Path, filename: str) -> list[dict[str, Any]]:
+def trainer_rows(dataset_path: Path, filename: str) -> list[dict[str, Any]]:
     root = dataset_path.resolve()
     rows = []
     for row in read_jsonl(root / filename):
         image_path = (root / row["image"]).resolve()
         if not image_path.is_relative_to(root) or not image_path.is_file():
             raise ValueError(f"Training image is missing or escapes dataset: {row['example_id']}")
-        rows.append({"image": str(image_path), "messages": row["messages"]})
+        messages = row["messages"]
+        if [message.get("role") for message in messages] != ["system", "user", "assistant"]:
+            raise ValueError(f"Compiled conversation shape drifted: {row['example_id']}")
+        rows.append(
+            {
+                "image": str(image_path),
+                "prompt": messages[:2],
+                "completion": messages[2:],
+            }
+        )
     if not rows:
         raise ValueError(f"Training input is empty: {filename}")
     return rows
+
+
+def _validate_target_selectors(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != {"language", "projector"}:
+        raise ValueError("target_module_selectors must define language and projector")
+    language = value["language"]
+    projector = value["projector"]
+    if not isinstance(language, dict) or set(language) != {"prefix", "suffixes"}:
+        raise ValueError("Language target selector is invalid")
+    if language["prefix"] != "model.language_model.":
+        raise ValueError("Language target selector must stay scoped to model.language_model")
+    expected_suffixes = {
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    }
+    if set(language["suffixes"]) != expected_suffixes:
+        raise ValueError("Language target suffix contract has drifted")
+    if not isinstance(projector, dict) or set(projector) != {"exact"}:
+        raise ValueError("Projector target selector is invalid")
+    if set(projector["exact"]) != {
+        "model.visual.merger.linear_fc1",
+        "model.visual.merger.linear_fc2",
+    }:
+        raise ValueError("Projector targets must be exact visual merger modules")
 
 
 def _installed_training_packages() -> dict[str, str]:

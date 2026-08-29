@@ -24,7 +24,16 @@ def test_release_compiler_is_stable_and_preserves_grouped_lineage(tmp_path: Path
     assert left["files_sha256"] == right["files_sha256"]
     assert validate_compiled_dataset(first)["valid"] is True
     assert read_json(first / "manifest.json")["source_release_splits_preserved"] is True
+    compiled_manifest = read_json(first / "manifest.json")
+    assert compiled_manifest["prompt"] == {
+        "version": "menu-v2-vision-v1",
+        "sha256": "c4c4466bbdf49eb066bab6486bd9c9a0bf9230aeafb2da60b0ab02cd617fa476",
+    }
     train = (first / "train.jsonl").read_text(encoding="utf-8")
+    first_example = json.loads(train.splitlines()[0])
+    assert first_example["prompt_sha256"] == compiled_manifest["prompt"]["sha256"]
+    assert first_example["messages"][0]["content"][0]["text"].endswith("\n")
+    assert not first_example["messages"][0]["content"][0]["text"].endswith("\n\n")
     assert "menu_00001_aug_01" in train
     assert "Page index: 0" in train
     assert "<ocr_lines>\\n1. Grill\\n2. Steak $12" in train

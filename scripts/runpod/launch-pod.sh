@@ -23,6 +23,7 @@ if [[ -n "$data_center_id" && ! "$data_center_id" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0
 fi
 : "${RUNPOD_API_KEY:?RUNPOD_API_KEY must be set in the environment}"
 command -v runpodctl >/dev/null || runpod_die "runpodctl is not installed"
+validate_delete_retry_config
 
 version="$(runpodctl version)"
 python3 -c '
@@ -36,12 +37,18 @@ echo "$version" >&2
 scratch="$(mktemp -d)"
 pod_id=""
 guard_armed=false
+watchdog_pid=""
 cleanup_launch_failure() {
   status=$?
+  trap - EXIT
   rm -rf -- "$scratch"
   if [[ $status -ne 0 && -n "$pod_id" && "$guard_armed" != true ]]; then
-    runpodctl pod delete "$pod_id" >/dev/null || true
-    echo "Launch setup failed after creation; requested immediate deletion of pod $pod_id" >&2
+    if [[ -n "$watchdog_pid" ]] && kill -0 "$watchdog_pid" 2>/dev/null; then
+      kill "$watchdog_pid" 2>/dev/null || true
+      wait "$watchdog_pid" 2>/dev/null || true
+    fi
+    echo "Launch setup failed after creation; deleting pod $pod_id before returning." >&2
+    delete_pod_until_absent "$pod_id"
   fi
   exit "$status"
 }
@@ -79,9 +86,17 @@ python3 "$script_dir/cost_guard.py" receipt --quote "$scratch/quote.json" \
   --pod-id "$pod_id" --output "$receipt" >/dev/null
 max_seconds="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["max_seconds"])' "$scratch/quote.json")"
 watchdog_log="$guard_dir/$pod_id.watchdog.log"
-nohup bash "$script_dir/delete-after.sh" "$pod_id" "$max_seconds" "$receipt" \
+watchdog_ready="$scratch/watchdog.ready"
+RUNPOD_DELETE_READY_FILE="$watchdog_ready" \
+  nohup bash "$script_dir/delete-after.sh" "$pod_id" "$max_seconds" "$receipt" \
   > "$watchdog_log" 2>&1 </dev/null &
 watchdog_pid=$!
+for _ in {1..100}; do
+  [[ ! -f "$watchdog_ready" ]] || break
+  kill -0 "$watchdog_pid" 2>/dev/null || runpod_die "deletion watchdog exited before arming"
+  sleep 0.05
+done
+[[ -f "$watchdog_ready" ]] || runpod_die "deletion watchdog did not arm within five seconds"
 guard_armed=true
 
 python3 -c '

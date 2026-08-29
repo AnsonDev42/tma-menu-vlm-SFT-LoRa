@@ -62,7 +62,9 @@ source lineage, split/role, OCR count, and prompt version/hash. The message orde
 matches production: system; user text with page index and numbered OCR; user
 image placeholder; compact assistant JSON. Training resolves the top-level image
 column through TRL's native VLM collator, avoiding manually constructed image
-tokens.
+tokens. The vendored system prompt is preserved byte-for-byte, including exactly
+one terminal LF: 4,284 UTF-8 bytes with SHA-256
+`c4c4466bbdf49eb066bab6486bd9c9a0bf9230aeafb2da60b0ab02cd617fa476`.
 
 `manifest.json` records the source release hash, split assignments, prompt hash,
 counts, every generated file SHA-256, and an aggregate dataset SHA-256. Repeated

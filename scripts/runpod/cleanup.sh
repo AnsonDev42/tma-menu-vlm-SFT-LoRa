@@ -15,12 +15,15 @@ validate_remote_root "$remote_root"
 if [[ -n "$delete_pod" && "$delete_pod" != "--delete-pod" ]]; then
   runpod_die "third argument must be --delete-pod"
 fi
+if [[ "$delete_pod" == "--delete-pod" ]]; then
+  validate_delete_retry_config
+fi
 
 load_ssh_info "$pod_id"
 ssh -i "$RUNPOD_SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
   -p "$RUNPOD_SSH_PORT" root@"$RUNPOD_SSH_IP" rm -rf -- "$remote_root"
 echo "Removed remote private workspace: $remote_root (not recoverable)" >&2
 if [[ "$delete_pod" == "--delete-pod" ]]; then
-  runpodctl pod delete "$pod_id"
-  echo "Deleted pod: $pod_id" >&2
+  delete_pod_until_absent "$pod_id"
+  echo "Confirmed deleted pod: $pod_id" >&2
 fi

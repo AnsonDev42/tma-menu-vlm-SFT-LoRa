@@ -15,7 +15,9 @@ checkpoints must remain outside Git.
 
 - Base: `Qwen/Qwen3-VL-4B-Instruct`
 - Revision: `ebb281ec70b05090aa6165b016eac8ec08e71b17`
-- Prompt: `menu-v2-vision-v1`, byte-for-byte TMA production system/user shape
+- Prompt: `menu-v2-vision-v1`, byte-for-byte TMA production system/user shape;
+  the 4,284-byte system prompt includes exactly one terminal LF and has SHA-256
+  `c4c4466bbdf49eb066bab6486bd9c9a0bf9230aeafb2da60b0ab02cd617fa476`
 - Training: seeded BF16 LoRA; one controlled 4-bit QLoRA fallback after OOM
 - Vision policy: vision blocks frozen; loaded language attention/MLP and exact
   multimodal merger modules are resolved to exact PEFT targets

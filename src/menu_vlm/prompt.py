@@ -4,7 +4,7 @@ from .constants import PROMPT_PATH, PROMPT_VERSION
 
 
 def system_prompt() -> str:
-    return PROMPT_PATH.read_text(encoding="utf-8").rstrip("\n")
+    return PROMPT_PATH.read_bytes().decode("utf-8")
 
 
 def prompt_sha256() -> str:

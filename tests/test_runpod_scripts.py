@@ -201,6 +201,8 @@ def test_launch_uses_supported_cli_price_quote_and_deletion_watchdog(tmp_path: P
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     invocation_log = tmp_path / "invocations"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
     _write_executable(
         fake_bin / "runpodctl",
         """#!/usr/bin/env bash
@@ -212,7 +214,17 @@ case "$1 $2" in
 "communityPricePerHr":null,"dataCenterAvailability":[{"dataCenterId":"EU-RO-1",
 "stockStatus":"high"}]}]' ;;
   "pod create") echo '{"id":"pod123","name":"synthetic"}' ;;
-  "pod delete") echo '{"id":"pod123","deleted":true}' ;;
+  "pod get")
+    if [[ -f "$FAKE_STATE_DIR/deleted" ]]; then
+      echo '{"error":"pod not found","code":"not_found"}' >&2
+      exit 1
+    fi
+    echo '{"id":"pod123"}'
+    ;;
+  "pod delete")
+    touch "$FAKE_STATE_DIR/deleted"
+    echo '{"id":"pod123","deleted":true}'
+    ;;
   *) exit 97 ;;
 esac
 """,
@@ -224,6 +236,9 @@ esac
         "RUNPOD_API_KEY": "synthetic-test-key",
         "RUNPOD_GUARD_DIR": str(guard_dir),
         "FAKE_INVOCATION_LOG": str(invocation_log),
+        "FAKE_STATE_DIR": str(state_dir),
+        "RUNPOD_DELETE_INITIAL_BACKOFF_SECONDS": "0",
+        "RUNPOD_DELETE_MAX_BACKOFF_SECONDS": "0",
     }
 
     result = _run(
@@ -250,16 +265,27 @@ esac
     assert "--container-disk-in-gb 20" in create
     assert "--volume-in-gb 100" in create
     assert "--cloud-type SECURE" in create
-    deadline = time.monotonic() + 3
-    while "pod delete pod123" not in invocation_log.read_text() and time.monotonic() < deadline:
+    watchdog_log = Path(payload["cost_guard"]["watchdog_log"])
+    deadline = time.monotonic() + 4
+    while (
+        (
+            not watchdog_log.exists()
+            or "Confirmed pod pod123 is absent" not in watchdog_log.read_text()
+        )
+        and time.monotonic() < deadline
+    ):
         time.sleep(0.05)
-    assert "pod delete pod123" in invocation_log.read_text()
+    invocations = invocation_log.read_text().splitlines()
+    assert invocations.count("pod delete pod123") == 1
+    assert invocations[-1] == "pod get pod123"
 
 
 def test_launch_deletes_created_pod_if_watchdog_setup_fails(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     invocation_log = tmp_path / "invocations"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
     _write_executable(
         fake_bin / "runpodctl",
         """#!/usr/bin/env bash
@@ -269,7 +295,26 @@ case "$1 $2" in
   "user ") echo '{"clientBalance":20.0}' ;;
   "gpu list") echo '[{"gpuId":"NVIDIA A40","securePricePerHr":0.44,"communityPricePerHr":null}]' ;;
   "pod create") echo '{"id":"pod123"}' ;;
-  "pod delete") echo '{"id":"pod123","deleted":true}' ;;
+  "pod get")
+    if [[ -f "$FAKE_STATE_DIR/deleted" ]]; then
+      echo '{"error":"pod not found","code":"not_found"}' >&2
+      exit 1
+    fi
+    echo '{"id":"pod123"}'
+    ;;
+  "pod delete")
+    count_file="$FAKE_STATE_DIR/delete-count"
+    count=0
+    [[ ! -f "$count_file" ]] || count="$(<"$count_file")"
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$count_file"
+    if [[ "$count" -eq 1 ]]; then
+      echo '{"error":"temporary outage","code":"network_error"}' >&2
+      exit 1
+    fi
+    touch "$FAKE_STATE_DIR/deleted"
+    echo '{"id":"pod123","deleted":true}'
+    ;;
   *) exit 97 ;;
 esac
 """,
@@ -283,6 +328,9 @@ esac
         "RUNPOD_API_KEY": "synthetic-test-key",
         "RUNPOD_GUARD_DIR": str(guard_dir),
         "FAKE_INVOCATION_LOG": str(invocation_log),
+        "FAKE_STATE_DIR": str(state_dir),
+        "RUNPOD_DELETE_INITIAL_BACKOFF_SECONDS": "0",
+        "RUNPOD_DELETE_MAX_BACKOFF_SECONDS": "0",
     }
 
     result = _run(
@@ -298,7 +346,234 @@ esac
     )
 
     assert result.returncode != 0
-    assert "pod delete pod123" in invocation_log.read_text()
+    assert state_dir.joinpath("deleted").is_file()
+    invocations = invocation_log.read_text().splitlines()
+    assert invocations.count("pod delete pod123") == 2
+    assert invocations[-1] == "pod get pod123"
+
+
+def test_delete_retries_transient_failure_until_absence_is_confirmed(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    invocation_log = tmp_path / "invocations"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    _write_executable(
+        fake_bin / "runpodctl",
+        """#!/usr/bin/env bash
+echo "$*" >> "$FAKE_INVOCATION_LOG"
+case "$1 $2" in
+  "pod get")
+    if [[ -f "$FAKE_STATE_DIR/deleted" ]]; then
+      echo '{"error":"pod not found","code":"not_found"}' >&2
+      exit 1
+    fi
+    echo '{"id":"pod123"}'
+    ;;
+  "pod delete")
+    count_file="$FAKE_STATE_DIR/delete-count"
+    count=0
+    [[ ! -f "$count_file" ]] || count="$(<"$count_file")"
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$count_file"
+    if [[ "$count" -eq 1 ]]; then
+      echo '{"error":"temporary outage","code":"network_error"}' >&2
+      exit 1
+    fi
+    touch "$FAKE_STATE_DIR/deleted"
+    echo '{"id":"pod123","deleted":true}'
+    ;;
+  *) exit 97 ;;
+esac
+""",
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "FAKE_INVOCATION_LOG": str(invocation_log),
+        "FAKE_STATE_DIR": str(state_dir),
+        "RUNPOD_DELETE_INITIAL_BACKOFF_SECONDS": "0",
+        "RUNPOD_DELETE_MAX_BACKOFF_SECONDS": "0",
+    }
+
+    result = _run(
+        "bash",
+        "-c",
+        'source "$1"; delete_pod_until_absent pod123',
+        "test",
+        str(RUNPOD / "lib.sh"),
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert invocation_log.read_text().splitlines() == [
+        "pod get pod123",
+        "pod delete pod123",
+        "pod get pod123",
+        "pod delete pod123",
+        "pod get pod123",
+    ]
+
+
+def test_delete_retries_when_success_is_visible_before_absence(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    invocation_log = tmp_path / "invocations"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    _write_executable(
+        fake_bin / "runpodctl",
+        """#!/usr/bin/env bash
+echo "$*" >> "$FAKE_INVOCATION_LOG"
+case "$1 $2" in
+  "pod get")
+    count=0
+    [[ ! -f "$FAKE_STATE_DIR/delete-count" ]] || count="$(<"$FAKE_STATE_DIR/delete-count")"
+    if [[ "$count" -ge 2 ]]; then
+      echo '{"error":"pod not found","code":"not_found"}' >&2
+      exit 1
+    fi
+    echo '{"id":"pod123"}'
+    ;;
+  "pod delete")
+    count=0
+    [[ ! -f "$FAKE_STATE_DIR/delete-count" ]] || count="$(<"$FAKE_STATE_DIR/delete-count")"
+    printf '%s\n' "$((count + 1))" > "$FAKE_STATE_DIR/delete-count"
+    echo '{"id":"pod123","deleted":true}'
+    ;;
+  *) exit 97 ;;
+esac
+""",
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "FAKE_INVOCATION_LOG": str(invocation_log),
+        "FAKE_STATE_DIR": str(state_dir),
+        "RUNPOD_DELETE_INITIAL_BACKOFF_SECONDS": "0",
+        "RUNPOD_DELETE_MAX_BACKOFF_SECONDS": "0",
+    }
+
+    result = _run(
+        "bash",
+        "-c",
+        'source "$1"; delete_pod_until_absent pod123',
+        "test",
+        str(RUNPOD / "lib.sh"),
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert invocation_log.read_text().splitlines() == [
+        "pod get pod123",
+        "pod delete pod123",
+        "pod get pod123",
+        "pod delete pod123",
+        "pod get pod123",
+    ]
+
+
+def test_delete_does_not_mutate_an_already_absent_pod(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    invocation_log = tmp_path / "invocations"
+    _write_executable(
+        fake_bin / "runpodctl",
+        """#!/usr/bin/env bash
+echo "$*" >> "$FAKE_INVOCATION_LOG"
+case "$1 $2" in
+  "pod get")
+    echo '{"error":"pod not found","code":"not_found"}' >&2
+    exit 1
+    ;;
+  "pod delete") exit 98 ;;
+  *) exit 97 ;;
+esac
+""",
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "FAKE_INVOCATION_LOG": str(invocation_log),
+    }
+
+    result = _run(
+        "bash",
+        "-c",
+        'source "$1"; delete_pod_until_absent pod123',
+        "test",
+        str(RUNPOD / "lib.sh"),
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert invocation_log.read_text().splitlines() == ["pod get pod123"]
+
+
+def test_deletion_watchdog_uses_confirmed_retry_path(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    invocation_log = tmp_path / "invocations"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text("{}\n", encoding="utf-8")
+    _write_executable(
+        fake_bin / "runpodctl",
+        """#!/usr/bin/env bash
+echo "$*" >> "$FAKE_INVOCATION_LOG"
+case "$1 $2" in
+  "pod get")
+    if [[ -f "$FAKE_STATE_DIR/deleted" ]]; then
+      echo '{"error":"pod not found","code":"not_found"}' >&2
+      exit 1
+    fi
+    echo '{"id":"pod123"}'
+    ;;
+  "pod delete")
+    count_file="$FAKE_STATE_DIR/delete-count"
+    count=0
+    [[ ! -f "$count_file" ]] || count="$(<"$count_file")"
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$count_file"
+    if [[ "$count" -eq 1 ]]; then
+      echo '{"error":"temporary outage","code":"network_error"}' >&2
+      exit 1
+    fi
+    touch "$FAKE_STATE_DIR/deleted"
+    echo '{"id":"pod123","deleted":true}'
+    ;;
+  *) exit 97 ;;
+esac
+""",
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "FAKE_INVOCATION_LOG": str(invocation_log),
+        "FAKE_STATE_DIR": str(state_dir),
+        "RUNPOD_DELETE_INITIAL_BACKOFF_SECONDS": "0",
+        "RUNPOD_DELETE_MAX_BACKOFF_SECONDS": "0",
+    }
+
+    result = _run(
+        "bash",
+        str(RUNPOD / "delete-after.sh"),
+        "pod123",
+        "1",
+        str(receipt),
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "confirmed pod pod123 is absent" in result.stderr.casefold()
+    assert invocation_log.read_text().splitlines() == [
+        "pod get pod123",
+        "pod delete pod123",
+        "pod get pod123",
+        "pod delete pod123",
+        "pod get pod123",
+    ]
 
 
 def _write_executable(path: Path, text: str) -> None:

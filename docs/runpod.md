@@ -20,8 +20,19 @@ script therefore creates the pod with supported flags and immediately arms a
 detached local deletion watchdog. It writes a cost/expiry receipt; detached
 training derives its GNU `timeout` from the receipt's remaining duration. The
 watchdog is real but host-local: the Mac that launched it must remain running and
-awake. Explicit retrieval and cleanup remain mandatory, and launch setup failure
-requests immediate pod deletion before returning an error.
+awake. It does not survive host power loss, reboot, forced process termination,
+or the host sleeping through the deadline; after an ordinary delayed wake it can
+only resume when the operating system schedules it. Explicit retrieval and
+cleanup plus a final `runpodctl pod list` remain mandatory.
+
+All scripted pod deletion is centralized on current `runpodctl` v2.12.0
+`pod get`/`pod delete` commands. It retries CLI/control-plane failures with
+exponential backoff capped at 30 seconds, repeats deletion when an accepted
+delete remains visible, and finishes only after `pod get` returns typed
+`not_found`. Launch setup failure after creation runs that confirmed deletion
+synchronously and does not return while the pod may still be present. Permanent
+authentication/configuration failures therefore intentionally leave cleanup
+running until an operator restores access; they are not downgraded to success.
 
 Start with one 48 GB A40 BF16 baseline, maximum three epochs. One BF16 CUDA OOM
 may fall back to the pinned 4-bit QLoRA mode. A second OOM, non-finite loss,
@@ -56,7 +67,9 @@ scripts/runpod/launch-pod.sh tma-qwen3-vl TEMPLATE_ID "NVIDIA A40" 8 20 100 DC_I
 The script requires `runpodctl >= 2.8.0`, checks auth/catalog/balance, creates no
 public application port, enables SSH, prints the pod JSON plus `cost_guard`
 receipt/watchdog fields, and returns once scheduled. Capture the pod ID and
-receipt path. Retry the transfer command if SSH is not ready yet.
+receipt path, keep the launcher host running and awake, and independently confirm
+the pod is gone in the Runpod console after the deadline. Retry the transfer
+command if SSH is not ready yet.
 
 ## 3. Transfer code and private data
 
@@ -108,6 +121,7 @@ scripts/runpod/cleanup.sh POD_ID /workspace/tma-menu-vlm --delete-pod
 runpodctl pod list
 ```
 
-Cleanup permanently removes the explicit remote private root and deletes the
-pod. If a separately created network volume was used, delete it only after the
+Cleanup permanently removes the explicit remote private root, requests pod
+deletion, and continues checking until `runpodctl pod get` confirms `not_found`.
+If a separately created network volume was used, delete it only after the
 returned adapter is verified; network-volume storage bills independently.

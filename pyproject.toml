@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling==1.28.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tma-menu-vlm"
+version = "0.1.0"
+description = "Private-data-safe Qwen3-VL menu grouping fine-tuning tools"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "MIT" }
+dependencies = [
+  "pydantic==2.12.5",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy==1.18.2",
+  "pytest==9.0.2",
+  "ruff==0.16.4",
+]
+train = [
+  "accelerate==1.14.0",
+  "bitsandbytes==0.50.2; platform_system == 'Linux'",
+  "datasets==5.0.1",
+  "peft==0.20.0",
+  "pillow==12.3.0",
+  "torch==2.13.0",
+  "transformers==5.16.1",
+  "trl==1.12.0",
+]
+
+[project.scripts]
+menu-vlm = "menu_vlm.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/menu_vlm"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["menu_vlm"]

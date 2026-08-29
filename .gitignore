@@ -1,0 +1,19 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Private datasets and generated model artifacts
+.local/
+data/
+datasets/
+artifacts/
+checkpoints/
+outputs/
+
+# Common local tooling
+.DS_Store
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/

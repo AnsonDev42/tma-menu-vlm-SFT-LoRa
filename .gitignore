@@ -10,6 +10,36 @@ datasets/
 artifacts/
 checkpoints/
 outputs/
+predictions/
+runs/
+wandb/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.jsonl
+*.parquet
+*.jpg
+*.jpeg
+*.png
+*.svg
+*.pdf
+*.heic
+*.heif
+*.avif
+*.jp2
+*.j2k
+*.jxl
+*.webp
+*.gif
+*.bmp
+*.tiff
+*.tif
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+checksums.sha256
 
 # Common local tooling
 .DS_Store
@@ -17,3 +47,7 @@ outputs/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/

@@ -339,6 +339,12 @@ def test_import_rejects_materialized_result_symlink_alias(tmp_path: Path) -> Non
         ("results-type", "collections are malformed"),
         ("results-entry", "collections are malformed"),
         ("items-entry", "collections are malformed"),
+        ("empty-objects", "item has an invalid key inventory"),
+        ("result-extra", "result row has an invalid inventory"),
+        ("item-extra", "item has an invalid key inventory"),
+        ("info-extra", "result info has an invalid inventory"),
+        ("item-binding", "result/item binding is invalid"),
+        ("note-location", "item has malformed field types"),
         ("count-type", "counts are malformed"),
         ("length-mismatch", "accounting is inconsistent"),
         ("count-sum", "accounting is inconsistent"),
@@ -347,6 +353,8 @@ def test_import_rejects_materialized_result_symlink_alias(tmp_path: Path) -> Non
         ("finish-reason", "provider evidence is contradictory"),
         ("timing", "timings are malformed"),
         ("processed-image", "processed image evidence is malformed"),
+        ("processed-digest", "does not match source processing"),
+        ("processed-dimensions", "does not match source processing"),
     ],
 )
 def test_import_rejects_invalid_materialized_result(
@@ -371,6 +379,30 @@ def test_import_rejects_invalid_materialized_result(
         result["results"] = [{}]
         result["items"] = [1]
         result["vision_item_count"] = 1
+    elif damage == "empty-objects":
+        result["results"] = [{}]
+        result["items"] = [{}]
+    elif damage == "result-extra":
+        result["results"][0]["unexpected"] = True
+    elif damage == "item-extra":
+        result["items"][0]["unexpected"] = True
+    elif damage == "info-extra":
+        result["results"][0]["info"]["unexpected"] = True
+    elif damage == "item-binding":
+        result["results"][0]["info"]["text"] = "Different"
+    elif damage == "note-location":
+        result["items"][0]["notes"] = [
+            {
+                "id": "synthetic-note",
+                "page_index": 0,
+                "original_text": "Synthetic note",
+                "ocr_line_indices": [2],
+                "locations": [True],
+                "translation": None,
+                "translation_language": None,
+                "translation_status": "pending",
+            }
+        ]
     elif damage == "count-type":
         result["vision_item_count"] = True
     elif damage == "length-mismatch":
@@ -378,7 +410,7 @@ def test_import_rejects_invalid_materialized_result(
         result["items"] = []
         result["vision_item_count"] = 1
     elif damage == "count-sum":
-        result["vision_item_count"] = 1
+        result["vision_item_count"] = 2
     elif damage == "provider-received":
         result["provider_response_received"] = False
     elif damage == "provider-error":
@@ -389,6 +421,10 @@ def test_import_rejects_invalid_materialized_result(
         result["provider_seconds"] = -1
     elif damage == "processed-image":
         result["processed_image"]["width"] = 0
+    elif damage == "processed-digest":
+        result["processed_image"]["sha256"] = "f" * 64
+    elif damage == "processed-dimensions":
+        result["processed_image"]["width"] += 1
     else:  # pragma: no cover - parametrization is exhaustive
         raise AssertionError(damage)
     _write_json(result_path, result)
@@ -415,6 +451,73 @@ def test_import_rejects_report_execution_mismatch(tmp_path: Path) -> None:
     _write_json(report_path, report)
 
     with pytest.raises(ValueError, match="execution identity mismatch"):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    [
+        ("report-extra", "report/run has an unexpected key inventory"),
+        ("run-extra", "report/run has an unexpected key inventory"),
+        ("document-extra", "report document has an unexpected key inventory"),
+        ("execution-extra", "report execution is malformed"),
+        ("document-count-bool", "document accounting is incomplete"),
+        ("completed-count-bool", "document accounting is incomplete"),
+        ("run-count-bool", "run/report document accounting is mismatched"),
+    ],
+)
+def test_import_rejects_malformed_report_shapes(
+    tmp_path: Path, damage: str, message: str
+) -> None:
+    dataset, root, run_id, _prediction_path, _document_id = _fixture(tmp_path)
+    evaluation = root / "evaluation" / run_id
+    report_path = evaluation / "report.json"
+    run_path = evaluation / "run.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    run = json.loads(run_path.read_text(encoding="utf-8"))
+    if damage == "report-extra":
+        report["unexpected"] = True
+    elif damage == "run-extra":
+        run["unexpected"] = True
+    elif damage == "document-extra":
+        report["documents"][0]["unexpected"] = True
+    elif damage == "execution-extra":
+        report["documents"][0]["execution"]["unexpected"] = True
+    elif damage == "document-count-bool":
+        report["document_count"] = True
+    elif damage == "completed-count-bool":
+        report["completed_document_count"] = True
+    elif damage == "run-count-bool":
+        run["document_count"] = True
+    else:  # pragma: no cover - parametrization is exhaustive
+        raise AssertionError(damage)
+    _write_json(report_path, report)
+    _write_json(run_path, run)
+
+    with pytest.raises(ValueError, match=message):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+def test_import_rejects_prediction_execution_extra_key(tmp_path: Path) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+    prediction["_evaluation"]["unexpected"] = True
+    _write_json(prediction_path, prediction)
+
+    with pytest.raises(ValueError, match="prediction execution is malformed"):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+def test_import_rejects_call_extra_key(tmp_path: Path) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+    key = prediction["_evaluation"]["cache_key"]
+    call_path = root / "baselines" / "tma-core" / key / "call.json"
+    call = json.loads(call_path.read_text(encoding="utf-8"))
+    call["unexpected"] = True
+    _write_json(call_path, call)
+
+    with pytest.raises(ValueError, match="call record is malformed"):
         import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 
@@ -513,6 +616,10 @@ def test_import_rejects_invalid_provider_envelope(
         ("message-missing", "assistant text content"),
         ("top-extra", "invalid completion envelope"),
         ("metadata-type", "malformed optional metadata"),
+        ("service-forged", "malformed optional metadata"),
+        ("moderation-forged", "malformed optional metadata"),
+        ("annotation-bool", "assistant text content"),
+        ("annotation-forged", "assistant text content"),
     ],
 )
 def test_import_rejects_malformed_provider_evidence(
@@ -555,6 +662,25 @@ def test_import_rejects_malformed_provider_evidence(
         raw["unexpected"] = True
     elif damage == "metadata-type":
         raw["service_tier"] = []
+    elif damage == "service-forged":
+        raw["service_tier"] = "forged"
+    elif damage == "moderation-forged":
+        raw["moderation"] = {"error": True}
+    elif damage == "annotation-bool":
+        message_value["annotations"] = [True]
+    elif damage == "annotation-forged":
+        message_value["annotations"] = [
+            {
+                "type": "url_citation",
+                "url_citation": {
+                    "start_index": 0,
+                    "end_index": 1,
+                    "title": "forged",
+                    "url": "not-a-url",
+                    "unexpected": True,
+                },
+            }
+        ]
     else:  # pragma: no cover - parametrization is exhaustive
         raise AssertionError(damage)
     _write_json(raw_path, raw)

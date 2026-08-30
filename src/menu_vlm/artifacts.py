@@ -1,11 +1,30 @@
 import gzip
+import re
 import shutil
 import tarfile
 from pathlib import Path
 from typing import Any
 
 from .constants import MODEL_ID, MODEL_REVISION
-from .jsonio import read_json, safe_relative, sha256_file, write_json
+from .jsonio import read_json, safe_relative, sha256_file, sha256_json, write_json
+
+_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_TEST_GATE_KEYS = {
+    "schema_version",
+    "identity",
+    "identity_sha256",
+    "reference_sha256",
+    "prediction_sha256",
+    "luna_prediction_sha256",
+    "status",
+    "metrics_sha256",
+}
+_TEST_GATE_IDENTITY_KEYS = {
+    "dataset_sha256",
+    "model_id",
+    "model_revision",
+    "checkpoint_sha256",
+}
 
 REQUIRED_ARTIFACT_ROLES = frozenset(
     {
@@ -75,6 +94,9 @@ def create_artifact_bundle(run_root: Path, spec_path: Path, output: Path) -> dic
                 "path": bundled_relative,
                 "sha256": sha256_file(target),
             }
+        _validate_test_gate(
+            destination / manifest_files["test_gate"]["path"], spec, manifest_files
+        )
         manifest = {
             "format": "tma-menu-vlm-adapter-bundle-v1",
             "schema_version": "1.0",
@@ -91,6 +113,39 @@ def create_artifact_bundle(run_root: Path, spec_path: Path, output: Path) -> dic
     except Exception:
         shutil.rmtree(destination, ignore_errors=True)
         raise
+
+
+def _validate_test_gate(
+    gate_path: Path, spec: dict[str, Any], manifest_files: dict[str, dict[str, str]]
+) -> None:
+    gate = read_json(gate_path)
+    if not isinstance(gate, dict) or set(gate) != _TEST_GATE_KEYS:
+        raise ValueError("Artifact test gate has an unexpected schema")
+    if gate.get("schema_version") != "1.0" or gate.get("status") != "completed":
+        raise ValueError("Artifact test gate is not completed schema version 1.0")
+    identity = gate.get("identity")
+    if not isinstance(identity, dict) or set(identity) != _TEST_GATE_IDENTITY_KEYS:
+        raise ValueError("Artifact test gate identity has an unexpected schema")
+    digests = (
+        gate.get("identity_sha256"),
+        gate.get("reference_sha256"),
+        gate.get("prediction_sha256"),
+        gate.get("luna_prediction_sha256"),
+        gate.get("metrics_sha256"),
+        identity.get("dataset_sha256"),
+        identity.get("checkpoint_sha256"),
+    )
+    if any(not isinstance(value, str) or not _DIGEST.fullmatch(value) for value in digests):
+        raise ValueError("Artifact test gate contains an invalid SHA-256 identity")
+    if (
+        identity.get("dataset_sha256") != spec.get("dataset_sha256")
+        or identity.get("model_id") != spec.get("model_id")
+        or identity.get("model_revision") != spec.get("model_revision")
+        or gate.get("identity_sha256") != sha256_json(identity)
+    ):
+        raise ValueError("Artifact test gate identity does not match the artifact spec")
+    if gate.get("luna_prediction_sha256") != manifest_files["luna_test_predictions"]["sha256"]:
+        raise ValueError("Artifact Luna predictions do not match the completed test gate")
 
 
 def package_directory(source: Path, archive: Path) -> dict[str, Any]:

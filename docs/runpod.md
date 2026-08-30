@@ -120,6 +120,9 @@ exact Luna test predictions. The pod copies that baseline to the fixed run path
 `run/luna-test-predictions.jsonl` and rechecks its sidecar immediately before
 the frozen test evaluation. Success ends with
 `TRAIN_EVAL_BUNDLE_DONE`; a merely running pod is not proof.
+Bundle creation independently revalidates the completed test gate and requires
+its Luna SHA-256 to match the copied fixed-path baseline, closing any mutation
+window between frozen evaluation and artifact packaging.
 
 ## 5. Retrieve and verify before deletion
 

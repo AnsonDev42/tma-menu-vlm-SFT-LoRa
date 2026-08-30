@@ -13,10 +13,12 @@ from .jsonio import (
     read_json,
     read_jsonl,
     sha256_file,
+    sha256_json,
     write_json,
     write_jsonl,
 )
 from .luna_baseline import approved_luna_runtime_contract
+from .tma_image import process_tma_image
 
 
 def create_synthetic_release(output: Path, *, include_splits: bool = True) -> dict[str, Any]:
@@ -181,6 +183,25 @@ def create_synthetic_artifact_run(output: Path, *, dataset_manifest_path: Path) 
         path = root / f"{role}.synthetic.txt"
         path.write_text(f"public synthetic {role}\n", encoding="utf-8")
         files[role] = path.name
+    identity = {
+        "dataset_sha256": dataset_manifest["dataset_sha256"],
+        "model_id": MODEL_ID,
+        "model_revision": MODEL_REVISION,
+        "checkpoint_sha256": "c" * 64,
+    }
+    write_json(
+        root / files["test_gate"],
+        {
+            "schema_version": "1.0",
+            "identity": identity,
+            "identity_sha256": sha256_json(identity),
+            "reference_sha256": "d" * 64,
+            "prediction_sha256": sha256_file(root / files["test_predictions"]),
+            "luna_prediction_sha256": sha256_file(root / files["luna_test_predictions"]),
+            "status": "completed",
+            "metrics_sha256": sha256_file(root / files["test_metrics"]),
+        },
+    )
     spec = {
         "schema_version": "1.0",
         "model_id": MODEL_ID,
@@ -208,12 +229,15 @@ def create_synthetic_luna_evaluation(dataset: Path, output: Path) -> dict[str, A
     root.mkdir(parents=True, exist_ok=True)
     run_id = "public-synthetic-luna"
     evaluation = root / "evaluation" / run_id
-    documents = []
+    documents: list[dict[str, Any]] = []
     contract = approved_luna_runtime_contract()
     try:
         for index, row in enumerate(read_jsonl(dataset_root / "test.jsonl"), 1):
             document_id = f"synthetic-tma-{index:04d}"
             image_sha256 = sha256_file(dataset_root / row["image"])
+            processed_bytes, processed_height, processed_width = process_tma_image(
+                (dataset_root / row["image"]).read_bytes()
+            )
             ocr = {
                 "schema_version": "1.0",
                 "provider": "public-synthetic",
@@ -234,24 +258,76 @@ def create_synthetic_luna_evaluation(dataset: Path, output: Path) -> dict[str, A
             cache_key = _tma_digest(inputs)
             call_path = f"baselines/tma-core/{cache_key}/call.json"
             execution = {
-                "state": "succeeded",
                 "cache_key": cache_key,
+                "cached": True,
+                "state": "succeeded",
+                "cost": {},
                 "call_path": call_path,
+                "provider_seconds": 0.01,
+                "fallback_item_count": 0,
                 "provider_error": None,
                 "provider_finish_reason": "stop",
+                "original_call_seconds": 0.01,
+            }
+            durable_item = {
+                "section_id": "section-public-synthetic",
+                "notes": [],
+                "information_only": False,
+                "source_text": "Steak $12",
+                "locator_text": "Steak $12",
+                "name": "Steak",
+                "ocr_line_indices": [2],
+                "translation": None,
+                "description": "charred vegetables",
+                "price": "$12",
+                "category": None,
+                "page_index": 0,
+                "vision_index": 0,
+                "confidence": 1.0,
+                "is_ocr_fallback": False,
+            }
+            serialized_result = {
+                "id": 0,
+                "info": {
+                    "section_id": "section-public-synthetic",
+                    "text": "Steak",
+                    "text_translation": "Steak",
+                    "description": "charred vegetables",
+                    "price": "$12",
+                    "price_info": {
+                        "raw": "$12",
+                        "amount": 12.0,
+                        "currency": "USD",
+                        "source": "symbol",
+                        "confidence": 0.9,
+                    },
+                    "category": None,
+                    "confidence": 1.0,
+                    "source_text": "Steak $12",
+                    "locator_text": "Steak $12",
+                    "page_index": 0,
+                    "page_label": "Page 1",
+                    "locations": [],
+                    "img_src": [],
+                    "ocr_line_indices": [2],
+                },
             }
             tma_result = {
                 "contract": contract,
-                "results": [],
-                "items": [],
-                "vision_item_count": 0,
+                "results": [serialized_result],
+                "items": [durable_item],
+                "vision_item_count": 1,
                 "fallback_item_count": 0,
                 "provider_error": None,
                 "provider_response_received": True,
                 "provider_finish_reason": "stop",
                 "provider_seconds": 0.01,
                 "extraction_seconds": 0.02,
-                "processed_image": {"sha256": image_sha256, "width": 320, "height": 240},
+                "processed_image": {
+                    "sha256": hashlib.sha256(processed_bytes).hexdigest(),
+                    "width": processed_width,
+                    "height": processed_height,
+                },
             }
             write_json(
                 evaluation / "references" / f"{document_id}.json",
@@ -260,7 +336,7 @@ def create_synthetic_luna_evaluation(dataset: Path, output: Path) -> dict[str, A
                     "image": {
                         "path": row["image"],
                         "sha256": image_sha256,
-                        "original_name": "public-synthetic.svg",
+                        "original_name": "public-synthetic.ppm",
                     },
                     "ocr": ocr,
                     "annotation": {"public_synthetic_fixture": True},
@@ -284,7 +360,15 @@ def create_synthetic_luna_evaluation(dataset: Path, output: Path) -> dict[str, A
             )
             write_json(
                 root / call_path,
-                {"state": "succeeded", "inputs": inputs, "result_path": "tma.json"},
+                {
+                    "state": "succeeded",
+                    "started_at": "2026-08-30T00:00:00Z",
+                    "inputs": inputs,
+                    "rate": {},
+                    "cost": {},
+                    "result_path": "tma.json",
+                    "elapsed_seconds": 0.01,
+                },
             )
             write_json(root / "baselines" / "tma-core" / cache_key / "tma.json", tma_result)
             write_json(
@@ -317,20 +401,47 @@ def create_synthetic_luna_evaluation(dataset: Path, output: Path) -> dict[str, A
                     },
                 },
             )
-            documents.append({"document_id": document_id, "execution": execution})
+            documents.append(
+                {
+                    "document_id": document_id,
+                    "schema_error": None,
+                    "counts": {},
+                    "metrics": {},
+                    "matches": [],
+                    "unmatched_gold": [],
+                    "unmatched_predictions": [],
+                    "latency_seconds": 0.01,
+                    "execution": execution,
+                }
+            )
+        baseline = {"contract": contract, "rate": {}, "unsupported_fields": []}
         metadata = {
             "run_id": run_id,
             "status": "complete",
             "model": "current-tma-core:gpt-5.6-luna",
+            "created_at": "2026-08-30T00:00:00Z",
+            "dataset_version": "synthetic-v1",
+            "git_commit": "public-synthetic",
             "document_count": len(documents),
+            "reference_kind": "public-synthetic",
+            "metric_version": "public-synthetic-v1",
+            "match_threshold": 0.5,
+            "release": "public-synthetic",
+            "release_caveats": [],
+            "baseline": baseline,
         }
         write_json(
             evaluation / "report.json",
             {
                 **metadata,
                 "completed_document_count": len(documents),
-                "baseline": {"contract": contract},
+                "metrics": {},
+                "counts": {},
+                "by_tag": {},
                 "documents": documents,
+                "worst_documents": [],
+                "costs": {},
+                "price_diagnostics": {},
             },
         )
         write_json(evaluation / "run.json", metadata)
@@ -354,19 +465,11 @@ def _record(
     source_id: str | None,
     annotation: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    image_relative = f"images/{document_id}.svg"
+    image_relative = f"images/{document_id}.ppm"
     image_path = root / image_relative
     image_path.parent.mkdir(parents=True, exist_ok=True)
-    label = document_id if source_id is None else f"{source_id} synthetic derivative"
-    image_path.write_text(
-        '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240">'
-        '<rect width="320" height="240" fill="white"/>'
-        f'<text x="20" y="40">SYNTHETIC {label}</text>'
-        '<text x="20" y="90">Grill</text>'
-        '<text x="20" y="130">Steak $12</text>'
-        "</svg>\n",
-        encoding="utf-8",
-    )
+    color = hashlib.sha256(document_id.encode()).digest()[:3]
+    image_path.write_bytes(b"P6\n320 240\n255\n" + color * (320 * 240))
     annotation = annotation or {
         "schema_version": "1.0",
         "currency": "USD",
@@ -405,7 +508,7 @@ def _record(
         "image": {
             "path": image_relative,
             "sha256": sha256_file(image_path),
-            "original_name": f"{document_id}.svg",
+            "original_name": f"{document_id}.ppm",
         },
         "ocr": {
             "schema_version": "1.0",

@@ -19,7 +19,12 @@ The return bundle is adapter-only and must contain exactly these roles:
 
 The artifact spec also requires model ID/revision, dataset SHA-256, seed, hardware,
 and commands. `menu-vlm bundle` copies only explicit files, hashes each role, and
-writes `artifact-manifest.json`. `menu-vlm package` creates a deterministic tarball,
+writes `artifact-manifest.json`. Before publishing that manifest, bundling requires
+an exact completed test-gate schema, verifies its typed identity and digest fields,
+and requires the gate's Luna prediction SHA-256 to equal the hash of the copied
+`luna_test_predictions` role. Mutating or replacing the baseline after test-gate
+consumption therefore fails bundle creation and removes the partial output.
+`menu-vlm package` creates a deterministic tarball,
 an internal file manifest, and an external SHA-256 sidecar. `verify-archive`
 rejects checksum drift, path traversal, links, unsupported entries, and missing or
 extra files before exposing the returned bundle.

@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
+from urllib.parse import urlsplit
+
+from openai.types.chat import ChatCompletion
+from pydantic import ValidationError
 
 from .compiler import validate_compiled_dataset
 from .jsonio import (
@@ -18,6 +22,7 @@ from .jsonio import (
 )
 from .prompt import render_user_prompt
 from .schemas import OCRDocument, validate_compact_output
+from .tma_image import process_tma_image
 
 _CURRENT_LUNA_MODEL = "current-tma-core:gpt-5.6-luna"
 _PROVIDER_MODEL = "gpt-5.6-luna"
@@ -109,6 +114,120 @@ _COMPLETION_TOKEN_DETAIL_KEYS = {
     "rejected_prediction_tokens",
 }
 _PROMPT_TOKEN_DETAIL_KEYS = {"audio_tokens", "cache_write_tokens", "cached_tokens"}
+_SERVICE_TIERS = {"auto", "default", "flex", "scale", "priority", "fast"}
+_REPORT_KEYS = {
+    "run_id",
+    "model",
+    "created_at",
+    "dataset_version",
+    "git_commit",
+    "document_count",
+    "reference_kind",
+    "metric_version",
+    "match_threshold",
+    "release",
+    "release_caveats",
+    "baseline",
+    "status",
+    "completed_document_count",
+    "metrics",
+    "counts",
+    "by_tag",
+    "documents",
+    "worst_documents",
+    "costs",
+    "price_diagnostics",
+}
+_RUN_KEYS = _REPORT_KEYS - {
+    "completed_document_count",
+    "metrics",
+    "counts",
+    "by_tag",
+    "documents",
+    "worst_documents",
+    "costs",
+    "price_diagnostics",
+}
+_REPORT_BASELINE_KEYS = {"contract", "rate", "unsupported_fields"}
+_REPORT_DOCUMENT_KEYS = {
+    "document_id",
+    "schema_error",
+    "counts",
+    "metrics",
+    "matches",
+    "unmatched_gold",
+    "unmatched_predictions",
+    "latency_seconds",
+    "execution",
+}
+_EXECUTION_KEYS = {
+    "cache_key",
+    "cached",
+    "state",
+    "cost",
+    "call_path",
+    "provider_seconds",
+    "fallback_item_count",
+    "provider_error",
+    "provider_finish_reason",
+    "original_call_seconds",
+}
+_PREDICTION_KEYS = {"prediction", "tma", "_evaluation"}
+_CALL_KEYS = {"state", "started_at", "inputs", "rate", "cost", "result_path", "elapsed_seconds"}
+_CALL_ALLOWED_KEYS = _CALL_KEYS | {"error"}
+_RESULT_KEYS = {"id", "info"}
+_ITEM_KEYS = {
+    "section_id",
+    "notes",
+    "information_only",
+    "source_text",
+    "locator_text",
+    "name",
+    "ocr_line_indices",
+    "translation",
+    "description",
+    "price",
+    "category",
+    "page_index",
+    "vision_index",
+    "confidence",
+    "is_ocr_fallback",
+}
+_INFO_BASE_KEYS = {
+    "text",
+    "text_translation",
+    "description",
+    "price",
+    "price_info",
+    "category",
+    "confidence",
+    "source_text",
+    "locator_text",
+    "page_index",
+    "page_label",
+    "locations",
+    "img_src",
+    "ocr_line_indices",
+}
+_NOTE_KEYS = {
+    "id",
+    "page_index",
+    "original_text",
+    "ocr_line_indices",
+    "locations",
+    "translation",
+    "translation_language",
+    "translation_status",
+}
+_NOTE_LOCATION_KEYS = {
+    "page_index",
+    "page_label",
+    "text",
+    "bounding_box",
+    "score",
+    "source",
+}
+_BOUNDING_BOX_KEYS = {"x", "y", "w", "h"}
 _APPROVED_CONTRACT_RESOURCE = "current_tma_contract_v1.json"
 _APPROVED_CONTRACT_SHA256 = "952e255374b961c90949566bc5de8fa92dff2198e7ccfc476a7c6fe1c0818cd6"
 
@@ -190,6 +309,7 @@ def import_luna_baseline(
         compiled_by_sha.items(), key=lambda item: str(item[1]["example_id"])
     ):
         document_id, reference = reference_by_sha[image_sha256]
+        source_image = safe_relative(dataset_root, str(compiled["image"]))
         compact, raw_text = _read_provider_compact_output(
             tma_root,
             predictions[document_id],
@@ -199,6 +319,7 @@ def import_luna_baseline(
             report_execution=completed.executions[document_id],
             document_id=document_id,
             image_sha256=image_sha256,
+            source_image=source_image,
         )
         rows.append(
             {
@@ -246,6 +367,8 @@ def _validate_completed_run(evaluation_root: Path, evaluation_run: str) -> _Comp
     run = read_json(_exact_relative(evaluation_root, "run.json", label="run metadata"))
     if not isinstance(report, dict) or not isinstance(run, dict):
         raise ValueError("TMA evaluation metadata must be JSON objects")
+    if set(report) != _REPORT_KEYS or set(run) != _RUN_KEYS:
+        raise ValueError("TMA evaluation report/run has an unexpected key inventory")
     if (
         report.get("run_id") != evaluation_run
         or report.get("status") != "complete"
@@ -256,15 +379,29 @@ def _validate_completed_run(evaluation_root: Path, evaluation_run: str) -> _Comp
     if report.get("model") != _CURRENT_LUNA_MODEL or run.get("model") != _CURRENT_LUNA_MODEL:
         raise ValueError("TMA evaluation is not the required current Luna model")
     baseline = report.get("baseline")
+    run_baseline = run.get("baseline")
+    if (
+        not isinstance(baseline, dict)
+        or set(baseline) != _REPORT_BASELINE_KEYS
+        or not isinstance(run_baseline, dict)
+        or set(run_baseline) != _REPORT_BASELINE_KEYS
+    ):
+        raise ValueError("TMA evaluation has malformed baseline provenance")
     contract = baseline.get("contract") if isinstance(baseline, dict) else None
-    if not isinstance(contract, dict):
+    run_contract = run_baseline.get("contract") if isinstance(run_baseline, dict) else None
+    if not isinstance(contract, dict) or not isinstance(run_contract, dict):
         raise ValueError("TMA evaluation has mismatched Luna contract provenance")
     _validate_runtime_contract(contract)
+    _validate_runtime_contract(run_contract)
+    if baseline != run_baseline:
+        raise ValueError("TMA evaluation has mismatched Luna contract provenance")
     documents = report.get("documents")
     if not isinstance(documents, list) or not documents:
         raise ValueError("TMA evaluation report has no completed documents")
     executions: dict[str, dict[str, Any]] = {}
     for document in documents:
+        if not isinstance(document, dict) or set(document) != _REPORT_DOCUMENT_KEYS:
+            raise ValueError("TMA evaluation report document has an unexpected key inventory")
         document_id = document.get("document_id") if isinstance(document, dict) else None
         if not isinstance(document_id, str) or not _SAFE_ID.fullmatch(document_id):
             raise ValueError("TMA evaluation report has an invalid document identity")
@@ -273,6 +410,8 @@ def _validate_completed_run(evaluation_root: Path, evaluation_run: str) -> _Comp
         execution = document.get("execution")
         if not isinstance(execution, dict):
             raise ValueError(f"TMA report execution is missing: {document_id}")
+        if set(execution) != _EXECUTION_KEYS or not _valid_execution_fields(execution):
+            raise ValueError(f"TMA report execution is malformed: {document_id}")
         if (
             execution.get("state") != "succeeded"
             or execution.get("provider_error") is not None
@@ -282,11 +421,13 @@ def _validate_completed_run(evaluation_root: Path, evaluation_run: str) -> _Comp
         executions[document_id] = execution
     expected = len(executions)
     if (
-        report.get("document_count") != expected
+        not _is_nonnegative_int(report.get("document_count"))
+        or not _is_nonnegative_int(report.get("completed_document_count"))
+        or report.get("document_count") != expected
         or report.get("completed_document_count") != expected
     ):
         raise ValueError("TMA evaluation document accounting is incomplete")
-    if run.get("document_count") != expected:
+    if not _is_nonnegative_int(run.get("document_count")) or run.get("document_count") != expected:
         raise ValueError("TMA evaluation run/report document accounting is mismatched")
     return _CompletedRun(contract=contract, executions=executions)
 
@@ -328,10 +469,15 @@ def _read_provider_compact_output(
     report_execution: dict[str, Any],
     document_id: str,
     image_sha256: str,
+    source_image: Path,
 ) -> tuple[dict[str, Any], str]:
+    if set(prediction) != _PREDICTION_KEYS:
+        raise ValueError(f"TMA prediction has an unexpected key inventory: {document_id}")
     evaluation = prediction.get("_evaluation")
     if not isinstance(evaluation, dict) or evaluation.get("state") != "succeeded":
         raise ValueError(f"TMA prediction is not a successful cached call: {document_id}")
+    if set(evaluation) != _EXECUTION_KEYS or not _valid_execution_fields(evaluation):
+        raise ValueError(f"TMA prediction execution is malformed: {document_id}")
     evidence_keys = (
         "cache_key",
         "call_path",
@@ -357,6 +503,14 @@ def _read_provider_compact_output(
     if not call_file.is_file():
         raise ValueError(f"TMA call record is missing: {document_id}")
     call = read_json(call_file)
+    if isinstance(call, dict) and call.get("error") is not None:
+        raise ValueError(f"TMA call records a provider error: {document_id}")
+    if (
+        not isinstance(call, dict)
+        or set(call) not in (_CALL_KEYS, _CALL_ALLOWED_KEYS)
+        or not _valid_call_fields(call)
+    ):
+        raise ValueError(f"TMA call record is malformed: {document_id}")
     inputs = call.get("inputs") if isinstance(call, dict) else None
     if not isinstance(inputs, dict) or set(inputs) != {
         "contract",
@@ -366,8 +520,6 @@ def _read_provider_compact_output(
         raise ValueError(f"TMA call inputs are malformed: {document_id}")
     if call.get("state") != "succeeded" or call.get("result_path") != "tma.json":
         raise ValueError(f"TMA call is not a completed extraction: {document_id}")
-    if call.get("error") is not None:
-        raise ValueError(f"TMA call records a provider error: {document_id}")
     if inputs.get("contract") != report_contract:
         raise ValueError(f"TMA call/report contract mismatch: {document_id}")
     if inputs.get("image_sha256") != image_sha256:
@@ -381,7 +533,13 @@ def _read_provider_compact_output(
     if not result_file.is_file():
         raise ValueError(f"TMA materialized result is missing: {document_id}")
     result = read_json(result_file)
-    _validate_materialized_result(result, report_contract, document_id)
+    _validate_materialized_result(
+        result,
+        report_contract,
+        document_id,
+        source_image=source_image,
+        ocr_line_count=ocr_line_count,
+    )
     if prediction.get("tma") != result:
         raise ValueError(f"TMA prediction is not bound to its materialized result: {document_id}")
     raw_relative = expected.with_name("provider.raw.json")
@@ -429,7 +587,7 @@ def _read_provider_compact_output(
         or set(message) != _MESSAGE_KEYS
         or message.get("role") != "assistant"
         or not isinstance(content, str)
-        or not isinstance(message.get("annotations"), list)
+        or not _valid_annotations(message.get("annotations"))
         or message.get("audio") is not None
     ):
         raise ValueError(
@@ -437,6 +595,12 @@ def _read_provider_compact_output(
         )
     if any(message.get(key) is not None for key in ("refusal", "tool_calls", "function_call")):
         raise ValueError(f"TMA assistant response contains a refusal or tool call: {document_id}")
+    try:
+        ChatCompletion.model_validate(raw)
+    except ValidationError as exc:
+        raise ValueError(
+            f"TMA provider response violates the approved OpenAI schema: {document_id}"
+        ) from exc
     try:
         payload = json.loads(content)
     except json.JSONDecodeError as exc:
@@ -525,7 +689,12 @@ def _validate_runtime_contract(contract: dict[str, Any]) -> None:
 
 
 def _validate_materialized_result(
-    result: Any, report_contract: dict[str, Any], document_id: str
+    result: Any,
+    report_contract: dict[str, Any],
+    document_id: str,
+    *,
+    source_image: Path,
+    ocr_line_count: int,
 ) -> None:
     if not isinstance(result, dict) or set(result) != _TMA_RESULT_KEYS:
         raise ValueError(f"TMA materialized result has an invalid key inventory: {document_id}")
@@ -547,6 +716,12 @@ def _validate_materialized_result(
     total_count = cast(int, vision_count) + cast(int, fallback_count)
     if len(results) != len(items) or len(items) != total_count:
         raise ValueError(f"TMA materialized result accounting is inconsistent: {document_id}")
+    for index, (serialized, item) in enumerate(zip(results, items, strict=True)):
+        _validate_tma_item(item, ocr_line_count, document_id)
+        _validate_tma_result_row(serialized, item, index, ocr_line_count, document_id)
+    observed_fallback = sum(item["is_ocr_fallback"] is True for item in items)
+    if observed_fallback != fallback_count or len(items) - observed_fallback != vision_count:
+        raise ValueError(f"TMA materialized result item accounting is inconsistent: {document_id}")
     if (
         result.get("provider_error") is not None
         or result.get("provider_response_received") is not True
@@ -569,6 +744,200 @@ def _validate_materialized_result(
         or not _is_positive_int(processed.get("height"))
     ):
         raise ValueError(f"TMA materialized processed image evidence is malformed: {document_id}")
+    processed_bytes, expected_height, expected_width = process_tma_image(source_image.read_bytes())
+    expected_processed = {
+        "sha256": hashlib.sha256(processed_bytes).hexdigest(),
+        "width": expected_width,
+        "height": expected_height,
+    }
+    if processed != expected_processed:
+        raise ValueError(
+            f"TMA materialized processed image does not match source processing: {document_id}"
+        )
+
+
+def _validate_tma_item(item: dict[str, Any], count: int, document_id: str) -> None:
+    if set(item) != _ITEM_KEYS:
+        raise ValueError(f"TMA materialized item has an invalid key inventory: {document_id}")
+    nullable_strings = (
+        "section_id",
+        "locator_text",
+        "translation",
+        "description",
+        "price",
+        "category",
+    )
+    if any(
+        item.get(key) is not None and not isinstance(item.get(key), str)
+        for key in nullable_strings
+    ):
+        raise ValueError(f"TMA materialized item has malformed text fields: {document_id}")
+    if (
+        not isinstance(item.get("name"), str)
+        or not item["name"].strip()
+        or not isinstance(item.get("source_text"), str)
+        or not isinstance(item.get("information_only"), bool)
+        or not isinstance(item.get("is_ocr_fallback"), bool)
+        or item.get("page_index") != 0
+        or not _valid_confidence(item.get("confidence"))
+        or not _valid_ocr_indices(item.get("ocr_line_indices"), count)
+        or not _valid_notes(item.get("notes"), count)
+    ):
+        raise ValueError(f"TMA materialized item has malformed field types: {document_id}")
+    vision_index = item.get("vision_index")
+    if vision_index is not None and not _is_nonnegative_int(vision_index):
+        raise ValueError(f"TMA materialized item has malformed vision identity: {document_id}")
+    if item["is_ocr_fallback"] is (vision_index is not None):
+        raise ValueError(
+            f"TMA materialized item has contradictory fallback identity: {document_id}"
+        )
+
+
+def _validate_tma_result_row(
+    row: dict[str, Any], item: dict[str, Any], index: int, count: int, document_id: str
+) -> None:
+    if set(row) != _RESULT_KEYS or row.get("id") != index or not isinstance(row.get("info"), dict):
+        raise ValueError(f"TMA materialized result row has an invalid inventory: {document_id}")
+    info = row["info"]
+    keys = set(info)
+    if not _INFO_BASE_KEYS.issubset(keys) or not keys.issubset(
+        _INFO_BASE_KEYS | {"section_id", "notes"}
+    ):
+        raise ValueError(f"TMA materialized result info has an invalid inventory: {document_id}")
+    section_id = item["section_id"]
+    notes = item["notes"]
+    if (info.get("section_id") if "section_id" in info else None) != section_id:
+        raise ValueError(f"TMA materialized result section binding is invalid: {document_id}")
+    if (info.get("notes") if "notes" in info else []) != _serialize_tma_notes(notes):
+        raise ValueError(f"TMA materialized result note binding is invalid: {document_id}")
+    expected = {
+        "text": item["name"],
+        "text_translation": item["translation"] or item["name"],
+        "description": item["description"],
+        "price": item["price"],
+        "category": item["category"],
+        "confidence": item["confidence"],
+        "source_text": item["source_text"],
+        "locator_text": item["locator_text"] or item["source_text"] or item["name"],
+        "page_index": item["page_index"],
+        "page_label": "Page 1",
+        "locations": [],
+        "img_src": [],
+        "ocr_line_indices": item["ocr_line_indices"],
+    }
+    if any(info.get(key) != value for key, value in expected.items()):
+        raise ValueError(f"TMA materialized result/item binding is invalid: {document_id}")
+    if not _valid_price_info(info.get("price_info"), item["price"]):
+        raise ValueError(f"TMA materialized result price info is malformed: {document_id}")
+    if not _valid_ocr_indices(info.get("ocr_line_indices"), count):
+        raise ValueError(f"TMA materialized result OCR identity is malformed: {document_id}")
+
+
+def _valid_price_info(value: Any, raw_price: Any) -> bool:
+    if raw_price is None:
+        return value is None
+    if not isinstance(value, dict):
+        return False
+    keys = set(value)
+    if keys not in (
+        {"raw", "source", "confidence"},
+        {"raw", "amount", "currency", "source", "confidence"},
+    ):
+        return False
+    if value.get("raw") != raw_price or not isinstance(value.get("source"), str):
+        return False
+    if not _valid_confidence(value.get("confidence")):
+        return False
+    if "amount" in value and not _is_nonnegative_number(value.get("amount")):
+        return False
+    return (
+        "currency" not in value
+        or value.get("currency") is None
+        or isinstance(value["currency"], str)
+    )
+
+
+def _valid_notes(value: Any, count: int) -> bool:
+    if not isinstance(value, list):
+        return False
+    for note in value:
+        if not isinstance(note, dict) or set(note) != _NOTE_KEYS:
+            return False
+        if (
+            not isinstance(note.get("id"), str)
+            or not note["id"]
+            or note.get("page_index") != 0
+            or not isinstance(note.get("original_text"), str)
+            or not note["original_text"]
+            or not _valid_ocr_indices(note.get("ocr_line_indices"), count)
+            or not _valid_note_locations(note.get("locations"))
+            or (
+                note.get("translation") is not None
+                and not isinstance(note.get("translation"), str)
+            )
+            or (
+                note.get("translation_language") is not None
+                and not isinstance(note.get("translation_language"), str)
+            )
+            or note.get("translation_status") not in {"pending", "translated", "unavailable"}
+        ):
+            return False
+    return True
+
+
+def _valid_note_locations(value: Any) -> bool:
+    if not isinstance(value, list):
+        return False
+    for location in value:
+        if not isinstance(location, dict) or set(location) != _NOTE_LOCATION_KEYS:
+            return False
+        box = location.get("bounding_box")
+        if (
+            location.get("page_index") != 0
+            or location.get("page_label") != "Page 1"
+            or not isinstance(location.get("text"), str)
+            or not location["text"]
+            or location.get("source") != "ocr_reference"
+            or not _valid_confidence(location.get("score"))
+            or not isinstance(box, dict)
+            or set(box) != _BOUNDING_BOX_KEYS
+            or any(not _valid_unit_number(box.get(key)) for key in _BOUNDING_BOX_KEYS)
+        ):
+            return False
+    return True
+
+
+def _serialize_tma_notes(notes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    for note in notes:
+        locations = []
+        for location in note["locations"]:
+            locations.append(
+                {
+                    key: value
+                    for key, value in location.items()
+                    if key != "bounding_box"
+                }
+                | {"boundingBox": location["bounding_box"]}
+            )
+        serialized.append(note | {"locations": locations})
+    return serialized
+
+
+def _valid_ocr_indices(value: Any, count: int) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == len(set(value))
+        and all(_is_positive_int(index) and index <= count for index in value)
+    )
+
+
+def _valid_confidence(value: Any) -> bool:
+    return _is_nonnegative_number(value) and value <= 1
+
+
+def _valid_unit_number(value: Any) -> bool:
+    return _is_nonnegative_number(value) and value <= 1
 
 
 def _is_safe_source_path(value: Any) -> bool:
@@ -610,10 +979,64 @@ def _valid_optional_provider_metadata(raw: dict[str, Any]) -> bool:
     service_tier = raw.get("service_tier")
     fingerprint = raw.get("system_fingerprint")
     return (
-        (moderation is None or isinstance(moderation, dict))
-        and (service_tier is None or isinstance(service_tier, str))
+        moderation is None
+        and (
+            service_tier is None
+            or (isinstance(service_tier, str) and service_tier in _SERVICE_TIERS)
+        )
         and (fingerprint is None or isinstance(fingerprint, str))
     )
+
+
+def _valid_execution_fields(value: dict[str, Any]) -> bool:
+    return (
+        isinstance(value.get("cached"), bool)
+        and isinstance(value.get("cost"), dict)
+        and _is_nonnegative_number(value.get("provider_seconds"))
+        and _is_nonnegative_int(value.get("fallback_item_count"))
+        and _is_nonnegative_number(value.get("original_call_seconds"))
+    )
+
+
+def _valid_call_fields(value: dict[str, Any]) -> bool:
+    return (
+        value.get("error") is None
+        and isinstance(value.get("started_at"), str)
+        and bool(value["started_at"].strip())
+        and isinstance(value.get("rate"), dict)
+        and isinstance(value.get("cost"), dict)
+        and _is_nonnegative_number(value.get("elapsed_seconds"))
+    )
+
+
+def _valid_annotations(value: Any) -> bool:
+    if not isinstance(value, list):
+        return False
+    for annotation in value:
+        if not isinstance(annotation, dict) or set(annotation) != {"type", "url_citation"}:
+            return False
+        citation = annotation.get("url_citation")
+        if annotation.get("type") != "url_citation" or not isinstance(citation, dict):
+            return False
+        if set(citation) != {"start_index", "end_index", "title", "url"}:
+            return False
+        start = citation.get("start_index")
+        end = citation.get("end_index")
+        title = citation.get("title")
+        url = citation.get("url")
+        if (
+            not _is_nonnegative_int(start)
+            or not _is_nonnegative_int(end)
+            or cast(int, end) < cast(int, start)
+            or not isinstance(title, str)
+            or not title.strip()
+            or not isinstance(url, str)
+        ):
+            return False
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return False
+    return True
 
 
 def _validate_provider_usage(value: Any, document_id: str) -> None:

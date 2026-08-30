@@ -176,7 +176,11 @@ def create_reordered_predictions(references: Path, output: Path) -> dict[str, An
 
 
 def create_synthetic_artifact_run(
-    output: Path, *, dataset_manifest_path: Path, response_provenance_path: Path
+    output: Path,
+    *,
+    dataset_manifest_path: Path,
+    response_provenance_path: Path,
+    luna_predictions_path: Path,
 ) -> dict[str, Any]:
     root = output.resolve()
     if root.exists() and any(root.iterdir()):
@@ -195,6 +199,7 @@ def create_synthetic_artifact_run(
         files[role] = path.name
     shutil.copyfile(dataset_manifest_path, root / files["dataset_manifest"])
     shutil.copyfile(response_provenance_path, root / files["luna_response_provenance"])
+    shutil.copyfile(luna_predictions_path, root / files["luna_test_predictions"])
     checkpoint_sha256 = sha256_json(
         {
             "adapter_config.json": sha256_file(root / files["adapter_config"]),
@@ -203,6 +208,7 @@ def create_synthetic_artifact_run(
     )
     identity = {
         "dataset_sha256": dataset_manifest["dataset_sha256"],
+        "dataset_manifest_sha256": sha256_file(root / files["dataset_manifest"]),
         "model_id": MODEL_ID,
         "model_revision": MODEL_REVISION,
         "checkpoint_sha256": checkpoint_sha256,
@@ -225,6 +231,7 @@ def create_synthetic_artifact_run(
         "model_id": MODEL_ID,
         "model_revision": MODEL_REVISION,
         "dataset_sha256": dataset_manifest["dataset_sha256"],
+        "dataset_manifest_sha256": identity["dataset_manifest_sha256"],
         "seed": 20260829,
         "hardware": {"gpu": "public-synthetic"},
         "commands": ["public synthetic smoke"],

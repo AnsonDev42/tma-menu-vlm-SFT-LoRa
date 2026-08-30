@@ -13,22 +13,33 @@ from menu_vlm.artifacts import (
 )
 from menu_vlm.compiler import CompileOptions, compile_release
 from menu_vlm.jsonio import sha256_file, sha256_json
+from menu_vlm.luna_baseline import import_luna_baseline
 from menu_vlm.synthetic import create_synthetic_luna_evaluation, create_synthetic_release
 
 
 @lru_cache(maxsize=1)
-def _synthetic_evidence() -> tuple[bytes, bytes]:
+def _synthetic_evidence() -> tuple[bytes, bytes, bytes]:
     with tempfile.TemporaryDirectory() as temporary:
-        root = Path(temporary)
+        root = Path(temporary).resolve()
         release = root / "release"
         dataset = root / "dataset"
         tma = root / "tma"
         create_synthetic_release(release)
         compile_release(CompileOptions(release=release, output=dataset))
-        create_synthetic_luna_evaluation(dataset, tma)
+        summary = create_synthetic_luna_evaluation(dataset, tma)
+        luna = root / "luna-test-predictions.jsonl"
+        import_luna_baseline(
+            dataset,
+            tma,
+            str(summary["evaluation_run"]),
+            tma / "luna-response-provenance.json",
+            tma / "luna-response-provenance.json.sha256",
+            luna,
+        )
         return (
             (dataset / "manifest.json").read_bytes(),
             (tma / "luna-response-provenance.json").read_bytes(),
+            luna.read_bytes(),
         )
 
 
@@ -40,8 +51,11 @@ def _artifact_run(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
         path = run / f"{role}.txt"
         path.write_text(f"synthetic {role}\n", encoding="utf-8")
         roles[role] = path.name
-    dataset_manifest_bytes, response_provenance_bytes = _synthetic_evidence()
+    dataset_manifest_bytes, response_provenance_bytes, luna_prediction_bytes = (
+        _synthetic_evidence()
+    )
     (run / roles["dataset_manifest"]).write_bytes(dataset_manifest_bytes)
+    (run / roles["luna_test_predictions"]).write_bytes(luna_prediction_bytes)
     provenance_path = run / roles["luna_response_provenance"]
     provenance_path = provenance_path.with_name("luna-response-provenance.json")
     (run / roles["luna_response_provenance"]).unlink()
@@ -58,6 +72,7 @@ def _artifact_run(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
     )
     identity = {
         "dataset_sha256": dataset_sha256,
+        "dataset_manifest_sha256": sha256_file(run / roles["dataset_manifest"]),
         "model_id": "Qwen/Qwen3-VL-4B-Instruct",
         "model_revision": "ebb281ec70b05090aa6165b016eac8ec08e71b17",
         "checkpoint_sha256": checkpoint_sha256,
@@ -85,6 +100,7 @@ def _artifact_run(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
                 "model_id": identity["model_id"],
                 "model_revision": identity["model_revision"],
                 "dataset_sha256": identity["dataset_sha256"],
+                "dataset_manifest_sha256": identity["dataset_manifest_sha256"],
                 "seed": 20260829,
                 "hardware": {"gpu": "synthetic"},
                 "commands": ["synthetic command"],
@@ -164,6 +180,22 @@ def test_artifact_bundle_rejects_mutated_luna_response_provenance(tmp_path: Path
     assert not (tmp_path / "bundle").exists()
 
 
+def test_artifact_bundle_rejects_new_gate_for_changed_luna_with_old_provenance(
+    tmp_path: Path,
+) -> None:
+    run, spec, roles = _artifact_run(tmp_path)
+    luna = run / roles["luna_test_predictions"]
+    luna.write_text('{"forged":"new Luna baseline"}\n', encoding="utf-8")
+    gate_path = run / roles["test_gate"]
+    gate = json.loads(gate_path.read_text(encoding="utf-8"))
+    gate["luna_prediction_sha256"] = sha256_file(luna)
+    gate_path.write_text(json.dumps(gate), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="response provenance"):
+        create_artifact_bundle(run, spec, tmp_path / "bundle")
+    assert not (tmp_path / "bundle").exists()
+
+
 @pytest.mark.parametrize("damage", ["wrong-name", "symlink", "role-collision"])
 def test_artifact_bundle_rejects_provenance_path_aliases_and_collisions(
     tmp_path: Path, damage: str
@@ -221,6 +253,34 @@ def test_artifact_bundle_rejects_dataset_manifest_mutated_after_completed_gate(
 
 
 @pytest.mark.parametrize(
+    "damage", ["split-assignment", "prompt", "source-manifest", "count-allocation"]
+)
+def test_artifact_bundle_rejects_semantic_manifest_mutation_with_unchanged_file_aggregate(
+    tmp_path: Path, damage: str
+) -> None:
+    run, spec, roles = _artifact_run(tmp_path)
+    manifest_path = run / roles["dataset_manifest"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if damage == "split-assignment":
+        key = next(iter(manifest["split_assignments"]))
+        manifest["split_assignments"][key] = (
+            "validation" if manifest["split_assignments"][key] != "validation" else "train"
+        )
+    elif damage == "prompt":
+        manifest["prompt"]["sha256"] = "f" * 64
+    elif damage == "source-manifest":
+        manifest["source_release_manifest_sha256"] = "f" * 64
+    else:
+        manifest["counts"]["train"] -= 1
+        manifest["counts"]["validation"] += 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="manifest bytes"):
+        create_artifact_bundle(run, spec, tmp_path / "bundle")
+    assert not (tmp_path / "bundle").exists()
+
+
+@pytest.mark.parametrize(
     ("damage", "message"),
     [
         ("reserved", "not completed"),
@@ -229,10 +289,12 @@ def test_artifact_bundle_rejects_dataset_manifest_mutated_after_completed_gate(
         ("extra", "unexpected schema"),
         ("digest-bool", "invalid SHA-256"),
         ("digest-invalid", "invalid SHA-256"),
+        ("manifest-digest-bool", "invalid SHA-256"),
         ("identity-missing", "identity has an unexpected schema"),
         ("identity-extra", "identity has an unexpected schema"),
         ("identity-digest", "identity does not match"),
         ("dataset", "identity does not match"),
+        ("manifest-spec-mismatch", "identity does not match"),
     ],
 )
 def test_artifact_bundle_rejects_invalid_test_gate(
@@ -253,6 +315,8 @@ def test_artifact_bundle_rejects_invalid_test_gate(
         gate["luna_prediction_sha256"] = True
     elif damage == "digest-invalid":
         gate["metrics_sha256"] = "not-a-digest"
+    elif damage == "manifest-digest-bool":
+        gate["identity"]["dataset_manifest_sha256"] = True
     elif damage == "identity-missing":
         gate["identity"].pop("checkpoint_sha256")
     elif damage == "identity-extra":
@@ -261,6 +325,9 @@ def test_artifact_bundle_rejects_invalid_test_gate(
         gate["identity_sha256"] = "d" * 64
     elif damage == "dataset":
         gate["identity"]["dataset_sha256"] = "e" * 64
+        gate["identity_sha256"] = sha256_json(gate["identity"])
+    elif damage == "manifest-spec-mismatch":
+        gate["identity"]["dataset_manifest_sha256"] = "e" * 64
         gate["identity_sha256"] = sha256_json(gate["identity"])
     else:  # pragma: no cover - parametrization is exhaustive
         raise AssertionError(damage)

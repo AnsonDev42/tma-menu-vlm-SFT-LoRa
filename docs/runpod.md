@@ -139,8 +139,10 @@ the frozen test evaluation. Success ends with
 `TRAIN_EVAL_BUNDLE_DONE`; a merely running pod is not proof.
 Bundle creation independently revalidates the completed test gate and requires
 its Luna SHA-256 to match the copied fixed-path baseline, closing any mutation
-window between frozen evaluation and artifact packaging. It also binds the copied
-fixed-name provenance role to the public approved aggregate anchor.
+window between frozen evaluation and artifact packaging. The gate also freezes the
+exact compiled manifest file SHA-256. Bundle creation binds the copied fixed-name
+provenance role to the public approved aggregate anchor and requires its baseline
+digest to equal the copied Luna prediction bytes.
 
 ## 5. Retrieve and verify before deletion
 

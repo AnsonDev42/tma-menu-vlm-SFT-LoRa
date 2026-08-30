@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import menu_vlm.luna_baseline as luna_baseline_module
 from menu_vlm.compiler import CompileOptions, compile_release
 from menu_vlm.jsonio import canonical_json, read_jsonl, verify_sha256_sidecar
 from menu_vlm.luna_baseline import (
@@ -82,6 +83,40 @@ def test_import_luna_baseline_matches_images_and_is_byte_deterministic(tmp_path:
     import_luna_baseline(dataset, root, run_id, output)
     assert output.read_bytes() == first
     assert output.with_suffix(".jsonl.sha256").read_bytes() == first_sidecar
+
+
+def test_import_rejects_output_not_bound_to_provenance_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset, root, run_id, _prediction, _document_id = _fixture(tmp_path)
+    output = tmp_path / "luna.jsonl"
+    original_write = luna_baseline_module.write_jsonl
+
+    def forged_write(path: Path, rows: list[dict[str, object]]) -> None:
+        original_write(path, rows)
+        path.write_bytes(path.read_bytes() + b'{"forged":true}\n')
+
+    monkeypatch.setattr(luna_baseline_module, "write_jsonl", forged_write)
+    with pytest.raises(ValueError, match="approved provenance identity"):
+        import_luna_baseline(dataset, root, run_id, output)
+    assert not output.exists()
+    assert not output.with_suffix(".jsonl.sha256").exists()
+
+
+def test_import_rejects_provenance_parent_directory_symlink_alias(tmp_path: Path) -> None:
+    dataset, root, run_id, _prediction, _document_id = _fixture(tmp_path)
+    alias = tmp_path / "provenance-parent-alias"
+    alias.symlink_to(root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match=r"parent paths.*filesystem aliases"):
+        _import_luna_baseline(
+            dataset,
+            root,
+            run_id,
+            alias / LUNA_RESPONSE_PROVENANCE_NAME,
+            alias / LUNA_RESPONSE_PROVENANCE_SIDECAR_NAME,
+            tmp_path / "luna.jsonl",
+        )
 
 
 def test_runtime_uses_approved_pydantic_version() -> None:
@@ -511,6 +546,24 @@ def test_import_rejects_report_execution_mismatch(tmp_path: Path) -> None:
         ("document-metrics-extra", "document metrics are malformed"),
         ("document-metrics-bool", "document metrics are malformed"),
         ("document-counts-bool", "document metrics are malformed"),
+        ("git-commit-type", "malformed audited metadata"),
+        ("reference-kind-type", "malformed audited metadata"),
+        ("metric-version-type", "malformed audited metadata"),
+        ("match-threshold-bool", "malformed audited metadata"),
+        ("match-threshold-string", "malformed audited metadata"),
+        ("release-type", "malformed audited metadata"),
+        ("release-caveats-type", "malformed audited metadata"),
+        ("release-caveat-item", "malformed audited metadata"),
+        ("by-tag-type", "malformed audited metadata"),
+        ("costs-type", "malformed audited metadata"),
+        ("price-diagnostics-type", "malformed audited metadata"),
+        ("rate-extra", "malformed rate provenance"),
+        ("unsupported-field-type", "malformed rate provenance"),
+        ("matches-type", "document metrics are malformed"),
+        ("match-shape", "document metrics are malformed"),
+        ("unmatched-gold-type", "document metrics are malformed"),
+        ("unmatched-prediction-item", "document metrics are malformed"),
+        ("worst-documents-type", "worst-document evidence is malformed"),
     ],
 )
 def test_import_rejects_malformed_report_shapes(
@@ -558,6 +611,44 @@ def test_import_rejects_malformed_report_shapes(
         report["documents"][0]["metrics"]["dish_f1"] = True
     elif damage == "document-counts-bool":
         report["documents"][0]["counts"]["documents"] = True
+    elif damage == "git-commit-type":
+        report["git_commit"] = run["git_commit"] = True
+    elif damage == "reference-kind-type":
+        report["reference_kind"] = run["reference_kind"] = []
+    elif damage == "metric-version-type":
+        report["metric_version"] = run["metric_version"] = 1
+    elif damage == "match-threshold-bool":
+        report["match_threshold"] = run["match_threshold"] = True
+    elif damage == "match-threshold-string":
+        report["match_threshold"] = run["match_threshold"] = "0.5"
+    elif damage == "release-type":
+        report["release"] = run["release"] = False
+    elif damage == "release-caveats-type":
+        report["release_caveats"] = run["release_caveats"] = "forged"
+    elif damage == "release-caveat-item":
+        report["release_caveats"] = run["release_caveats"] = [True]
+    elif damage == "by-tag-type":
+        report["by_tag"] = []
+    elif damage == "costs-type":
+        report["costs"] = []
+    elif damage == "price-diagnostics-type":
+        report["price_diagnostics"] = []
+    elif damage == "rate-extra":
+        report["baseline"]["rate"]["forged"] = True
+        run["baseline"]["rate"]["forged"] = True
+    elif damage == "unsupported-field-type":
+        report["baseline"]["unsupported_fields"] = [True]
+        run["baseline"]["unsupported_fields"] = [True]
+    elif damage == "matches-type":
+        report["documents"][0]["matches"] = {}
+    elif damage == "match-shape":
+        report["documents"][0]["matches"] = [{"forged": True}]
+    elif damage == "unmatched-gold-type":
+        report["documents"][0]["unmatched_gold"] = {}
+    elif damage == "unmatched-prediction-item":
+        report["documents"][0]["unmatched_predictions"] = [True]
+    elif damage == "worst-documents-type":
+        report["worst_documents"] = {}
     else:  # pragma: no cover - parametrization is exhaustive
         raise AssertionError(damage)
     _write_json(report_path, report)

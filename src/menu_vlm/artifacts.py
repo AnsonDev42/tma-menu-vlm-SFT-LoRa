@@ -32,6 +32,7 @@ _TEST_GATE_KEYS = {
 }
 _TEST_GATE_IDENTITY_KEYS = {
     "dataset_sha256",
+    "dataset_manifest_sha256",
     "model_id",
     "model_revision",
     "checkpoint_sha256",
@@ -78,6 +79,7 @@ def create_artifact_bundle(run_root: Path, spec_path: Path, output: Path) -> dic
         "model_id",
         "model_revision",
         "dataset_sha256",
+        "dataset_manifest_sha256",
         "seed",
         "hardware",
         "commands",
@@ -124,6 +126,7 @@ def create_artifact_bundle(run_root: Path, spec_path: Path, output: Path) -> dic
             "model_id": spec["model_id"],
             "model_revision": spec["model_revision"],
             "dataset_sha256": spec["dataset_sha256"],
+            "dataset_manifest_sha256": spec["dataset_manifest_sha256"],
             "seed": spec["seed"],
             "hardware": spec["hardware"],
             "commands": spec["commands"],
@@ -154,12 +157,14 @@ def _validate_test_gate(
         gate.get("luna_prediction_sha256"),
         gate.get("metrics_sha256"),
         identity.get("dataset_sha256"),
+        identity.get("dataset_manifest_sha256"),
         identity.get("checkpoint_sha256"),
     )
     if any(not isinstance(value, str) or not _DIGEST.fullmatch(value) for value in digests):
         raise ValueError("Artifact test gate contains an invalid SHA-256 identity")
     if (
         identity.get("dataset_sha256") != spec.get("dataset_sha256")
+        or identity.get("dataset_manifest_sha256") != spec.get("dataset_manifest_sha256")
         or identity.get("model_id") != spec.get("model_id")
         or identity.get("model_revision") != spec.get("model_revision")
         or gate.get("identity_sha256") != sha256_json(identity)
@@ -182,6 +187,11 @@ def _validate_test_gate(
         raise ValueError("Artifact adapter does not match the completed test gate checkpoint")
 
     dataset_manifest_path = Path(manifest_files["dataset_manifest"]["path"])
+    if (
+        identity.get("dataset_manifest_sha256")
+        != manifest_files["dataset_manifest"]["sha256"]
+    ):
+        raise ValueError("Artifact dataset manifest bytes do not match the completed test gate")
     dataset_manifest = read_json(gate_path.parent.parent.parent / dataset_manifest_path)
     _validate_compiled_dataset_manifest(dataset_manifest)
     files_sha256 = dataset_manifest["files_sha256"]
@@ -203,6 +213,8 @@ def _validate_test_gate(
     if (
         not isinstance(provenance, dict)
         or provenance.get("dataset_sha256") != dataset_manifest.get("dataset_sha256")
+        or provenance.get("baseline_prediction_sha256")
+        != manifest_files["luna_test_predictions"]["sha256"]
     ):
         raise ValueError("Artifact Luna response provenance does not match the dataset identity")
 

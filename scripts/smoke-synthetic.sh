@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-scratch="$(mktemp -d)"
+scratch="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf -- "$scratch"' EXIT
 cd "$repository_root"
 
@@ -40,6 +40,7 @@ PY
 
 uv run menu-vlm synthetic-artifact-run --dataset-manifest "$scratch/compiled-a/manifest.json" \
   --response-provenance "$scratch/tma-data/luna-response-provenance.json" \
+  --luna-predictions "$scratch/luna-test-predictions.jsonl" \
   --output "$scratch/synthetic-run"
 uv run menu-vlm bundle --run-root "$scratch/synthetic-run" \
   --spec "$scratch/synthetic-run/artifact-spec.json" --output "$scratch/bundle"

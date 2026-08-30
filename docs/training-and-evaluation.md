@@ -67,6 +67,7 @@ uv run menu-vlm evaluate-test \
   --references /workspace/private-dataset/test.jsonl \
   --predictions /workspace/run/test.predictions.jsonl \
   --dataset-sha256 DATASET_SHA256 \
+  --dataset-manifest /workspace/private-dataset/manifest.json \
   --checkpoint /workspace/run/selected-adapter \
   --gate-store /workspace/tma-menu-vlm/frozen-test-gates \
   --luna-predictions /workspace/run/luna-test-predictions.jsonl \
@@ -74,7 +75,7 @@ uv run menu-vlm evaluate-test \
 ```
 
 The fixed gate store is outside the training/evaluation output tree and writes one
-gate keyed by dataset SHA-256, pinned model ID and
+gate keyed by dataset SHA-256, the exact compiled manifest file SHA-256, pinned model ID and
 revision, and the hashes of the selected adapter config/weights. Replaying the
 same identity with a different metrics output path or predictions file still
 fails. The gate also records the required Luna prediction SHA-256, while keeping
@@ -84,7 +85,8 @@ creates a different identity. Use validation—not frozen test—for iteration.
 The returned artifact also carries the fixed-name approved Luna response
 provenance manifest. Bundle creation verifies its aggregate anchor and the exact
 compiled dataset manifest schema/accounting before binding either to the frozen
-gate.
+gate. The provenance baseline digest must also equal the returned Luna prediction
+bytes, so importer and bundle success both prove the same baseline identity.
 
 Mac inference is optional. The authoritative run is on the Runpod environment;
 the 16 GB Mac path is limited to build/validation/preflight unless a compatible

@@ -168,12 +168,15 @@ def test_frozen_test_gate_is_bound_to_dataset_model_and_adapter_not_output_path(
     gate_store = tmp_path / "fixed-test-gates"
     luna_predictions = tmp_path / "luna-predictions.jsonl"
     write_jsonl(luna_predictions, [{"example_id": "a", "prediction": REFERENCE}])
+    dataset_manifest = tmp_path / "manifest.json"
+    dataset_manifest.write_text(json.dumps({"dataset_sha256": "a" * 64}), encoding="utf-8")
 
     evaluate_test_once(
         references,
         predictions,
         tmp_path / "first-metrics.json",
         dataset_sha256="a" * 64,
+        dataset_manifest=dataset_manifest,
         checkpoint=adapter,
         gate_store=gate_store,
         luna_predictions=luna_predictions,
@@ -185,6 +188,7 @@ def test_frozen_test_gate_is_bound_to_dataset_model_and_adapter_not_output_path(
             predictions,
             tmp_path / "different-output.json",
             dataset_sha256="a" * 64,
+            dataset_manifest=dataset_manifest,
             checkpoint=adapter,
             gate_store=gate_store,
             luna_predictions=luna_predictions,
@@ -199,6 +203,7 @@ def test_frozen_test_gate_is_bound_to_dataset_model_and_adapter_not_output_path(
         predictions,
         tmp_path / "other-checkpoint-metrics.json",
         dataset_sha256="a" * 64,
+        dataset_manifest=dataset_manifest,
         checkpoint=other_adapter,
         gate_store=gate_store,
         luna_predictions=luna_predictions,
@@ -206,3 +211,17 @@ def test_frozen_test_gate_is_bound_to_dataset_model_and_adapter_not_output_path(
     assert len(list(gate_store.glob("*.json"))) == 2
     gates = [json.loads(path.read_text(encoding="utf-8")) for path in gate_store.glob("*.json")]
     assert all(gate["luna_prediction_sha256"] for gate in gates)
+    assert all(gate["identity"]["dataset_manifest_sha256"] for gate in gates)
+
+    dataset_manifest.write_text(json.dumps({"dataset_sha256": "b" * 64}), encoding="utf-8")
+    with pytest.raises(ValueError, match="manifest does not match"):
+        evaluate_test_once(
+            references,
+            predictions,
+            tmp_path / "mismatched-manifest-metrics.json",
+            dataset_sha256="a" * 64,
+            dataset_manifest=dataset_manifest,
+            checkpoint=adapter,
+            gate_store=gate_store,
+            luna_predictions=luna_predictions,
+        )

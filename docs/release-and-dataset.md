@@ -112,8 +112,9 @@ checksum verified, must match the public production aggregate anchor, and binds
 all and only the compiled test/report documents one-to-one by image hash, cache
 key, exact call and raw-response paths, call identity, and raw-response SHA-256.
 There is no production fallback. Approval generation independently reproduces
-the predictions and requires the canonical fixed baseline digest before writing
-the private manifest and sidecar. Private paths and per-document hashes remain
+the predictions, requires the canonical fixed baseline digest, and runs the
+generated manifest through the same downstream importer before reporting success.
+Private paths and per-document hashes remain
 outside Git. Only the sibling `provider.raw.json` is read, and it must be an error-free typed
 OpenAI 3.0.0 `ChatCompletion` envelope parsed in strict mode with Pydantic 2.13.4,
 the approved exact model, null logprobs, nonnegative
@@ -123,12 +124,17 @@ exactly one index-zero stopped Luna assistant text response. Refusal or
 tool/function calls fail, and
 the reference OCR and compact JSON are also parsed in strict mode, and the compact
 output must reference only the compiled OCR line range. Completed-run metadata is
-also closed: `schema_error` is null, timestamps and dataset versions are strings,
-and overall/per-document metrics and count objects have the approved exact typed
-schemas with bool-safe integer accounting.
+also closed: `schema_error` is null; shared commit/reference/metric/release fields,
+thresholds, caveats and timestamps are strictly typed; report summary collections,
+cost/price diagnostics, worst-document rows, matches and unmatched inventories use
+their exact audited nested schemas; and overall/per-document metrics and counts use
+bool-safe accounting.
 
 The importer writes prediction JSONL ordered by compiled example ID and an exact
-`<output>.sha256` sidecar. Both are private test evidence: keep them outside Git,
+`<output>.sha256` sidecar. Before success, that final output digest must equal the
+manifest's `baseline_prediction_sha256`; a mismatch removes both output and sidecar.
+The manifest and sidecar path, including every parent component, must be canonical
+and symlink-free. Both are private test evidence: keep them outside Git,
 transfer them directly to the pod together with the private provenance manifest,
 and return both fixed-name files in the adapter bundle. The public synthetic smoke
 uses a separate pinned synthetic-only provenance aggregate accepted only for the

@@ -2,6 +2,7 @@ import hashlib
 import json
 import math
 import re
+import tempfile
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
@@ -342,6 +343,64 @@ _COUNT_KEYS = {
     "variant_correct",
     "variant_targets",
 }
+_RATE_KEYS = {
+    "cached_input_per_million",
+    "endpoint",
+    "input_per_million",
+    "max_input_tokens",
+    "model",
+    "notes",
+    "output_per_million",
+    "source",
+    "valid_through",
+    "verified_on",
+}
+_COST_KEYS = {
+    "all_predictions_estimated_usd",
+    "cached_predictions",
+    "input_tokens",
+    "new_attempts",
+    "new_estimated_usd",
+    "non_stop_responses",
+    "original_api_latency_median_seconds",
+    "output_tokens",
+    "provider_errors",
+    "provider_seconds_total",
+    "unknown_new_costs",
+    "unknown_original_costs",
+}
+_COST_INTEGER_KEYS = {
+    "cached_predictions",
+    "input_tokens",
+    "new_attempts",
+    "non_stop_responses",
+    "output_tokens",
+    "provider_errors",
+    "unknown_new_costs",
+    "unknown_original_costs",
+}
+_PRICE_DIAGNOSTIC_KEYS = {
+    "different_price_values_or_count",
+    "missing_prices",
+    "undetected_priced_dishes",
+}
+_WORST_DOCUMENT_KEYS = {"document_id", "extra", "missing", "price_errors"}
+_MATCH_KEYS = {
+    "description_correct",
+    "gold_index",
+    "gold_name",
+    "predicted_index",
+    "predicted_name",
+    "predicted_prices",
+    "predicted_section",
+    "price_correct",
+    "price_issue",
+    "price_value_correct",
+    "reference_prices",
+    "reference_section",
+    "score",
+    "section_correct",
+}
 
 
 @dataclass(frozen=True)
@@ -420,8 +479,31 @@ def approve_luna_response_provenance(
         CANONICAL_LUNA_BASELINE_SHA256,
         documents,
     )
-    write_json(destination, manifest)
-    digest = write_sha256_sidecar(destination, sidecar)
+    try:
+        write_json(destination, manifest)
+        digest = write_sha256_sidecar(destination, sidecar)
+        _load_response_provenance(
+            destination, sidecar, dataset_manifest, evaluation_run
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            validated_output = Path(temporary) / "luna-test-predictions.jsonl"
+            imported = import_luna_baseline(
+                dataset_root,
+                tma_data_root,
+                evaluation_run,
+                destination,
+                sidecar,
+                validated_output,
+            )
+            if (
+                imported["prediction_sha256"] != CANONICAL_LUNA_BASELINE_SHA256
+                or validated_output.read_bytes() != baseline.read_bytes()
+            ):
+                raise ValueError("Generated response provenance failed downstream validation")
+    except Exception:
+        destination.unlink(missing_ok=True)
+        sidecar.unlink(missing_ok=True)
+        raise
     return {
         "valid": True,
         "documents": len(documents),
@@ -453,8 +535,16 @@ def write_synthetic_response_provenance(
         baseline_sha256,
         documents,
     )
-    write_json(destination, manifest)
-    digest = write_sha256_sidecar(destination, sidecar)
+    try:
+        write_json(destination, manifest)
+        digest = write_sha256_sidecar(destination, sidecar)
+        _load_response_provenance(
+            destination, sidecar, dataset_manifest, evaluation_run
+        )
+    except Exception:
+        destination.unlink(missing_ok=True)
+        sidecar.unlink(missing_ok=True)
+        raise
     return {"manifest": str(destination), "sidecar": str(sidecar), "sha256": digest}
 
 
@@ -498,6 +588,11 @@ def import_luna_baseline(
 
     try:
         write_jsonl(destination, rows)
+        digest = sha256_file(destination)
+        if digest != provenance["baseline_prediction_sha256"]:
+            raise ValueError(
+                "Imported Luna baseline does not match the approved provenance identity"
+            )
         digest = write_sha256_sidecar(destination, sidecar)
     except Exception:
         destination.unlink(missing_ok=True)
@@ -749,10 +844,8 @@ def _provenance_pair(
         or ".." in checksum_input.parts
     ):
         raise ValueError("Luna response provenance must use the reserved fixed filenames")
-    if manifest_input.is_symlink() or checksum_input.is_symlink():
-        raise ValueError("Luna response provenance paths must not use filesystem aliases")
-    manifest = manifest_input.resolve()
-    checksum = checksum_input.resolve()
+    manifest = _canonical_unaliased_path(manifest_input, must_exist=must_exist)
+    checksum = _canonical_unaliased_path(checksum_input, must_exist=must_exist)
     if checksum != manifest.with_name(LUNA_RESPONSE_PROVENANCE_SIDECAR_NAME):
         raise ValueError("Luna response provenance must use one fixed-name evidence pair")
     if must_exist:
@@ -761,6 +854,23 @@ def _provenance_pair(
     elif manifest.exists() or checksum.exists():
         raise FileExistsError("Luna response provenance manifest or sidecar already exists")
     return manifest, checksum
+
+
+def _canonical_unaliased_path(path: Path, *, must_exist: bool) -> Path:
+    absolute = path.absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:-1]:
+        current /= part
+        if current.is_symlink() or not current.is_dir():
+            raise ValueError(
+                "Luna response provenance parent paths must not use filesystem aliases"
+            )
+    if absolute.is_symlink():
+        raise ValueError("Luna response provenance paths must not use filesystem aliases")
+    resolved = absolute.resolve(strict=must_exist)
+    if resolved != absolute:
+        raise ValueError("Luna response provenance paths must not use filesystem aliases")
+    return resolved
 
 
 def _require_unaliased_file(path: Path, label: str) -> None:
@@ -803,6 +913,21 @@ def _validate_completed_run(
         or not _valid_metrics(report.get("metrics"), synthetic=synthetic)
         or not _valid_counts(report.get("counts"), synthetic=synthetic, document=False)
         or synthetic != synthetic_dataset
+        or any(
+            not isinstance(report.get(key), str) or not report[key].strip()
+            for key in ("git_commit", "reference_kind", "metric_version", "release")
+        )
+        or not _is_nonnegative_number(report.get("match_threshold"))
+        or not isinstance(report.get("release_caveats"), list)
+        or any(
+            not isinstance(item, str) or not item.strip()
+            for item in report["release_caveats"]
+        )
+        or report.get("by_tag") != {}
+        or not _valid_costs(report.get("costs"), synthetic=synthetic)
+        or not _valid_price_diagnostics(
+            report.get("price_diagnostics"), synthetic=synthetic
+        )
     ):
         raise ValueError("TMA evaluation report has malformed audited metadata")
     if (
@@ -832,7 +957,14 @@ def _validate_completed_run(
     if baseline != run_baseline:
         raise ValueError("TMA evaluation has mismatched Luna contract provenance")
     rate = baseline.get("rate")
-    if not isinstance(rate, dict):
+    unsupported_fields = baseline.get("unsupported_fields")
+    if (
+        not _valid_rate(rate, synthetic=synthetic)
+        or not isinstance(unsupported_fields, list)
+        or any(
+            not isinstance(item, str) or not item.strip() for item in unsupported_fields
+        )
+    ):
         raise ValueError("TMA evaluation has malformed rate provenance")
     documents = report.get("documents")
     if not isinstance(documents, list) or not documents:
@@ -850,6 +982,7 @@ def _validate_completed_run(
             document.get("schema_error") is not None
             or not _valid_metrics(document.get("metrics"), synthetic=synthetic)
             or not _valid_counts(document.get("counts"), synthetic=synthetic, document=True)
+            or not _valid_document_comparisons(document, synthetic=synthetic)
         ):
             raise ValueError(f"TMA evaluation report document metrics are malformed: {document_id}")
         execution = document.get("execution")
@@ -878,7 +1011,13 @@ def _validate_completed_run(
         raise ValueError("TMA evaluation run/report document accounting is mismatched")
     if any(report.get(key) != run.get(key) for key in _RUN_KEYS):
         raise ValueError("TMA evaluation report/run shared fields are mismatched")
-    return _CompletedRun(contract=contract, rate=rate, executions=executions)
+    if not _valid_worst_documents(
+        report.get("worst_documents"), set(executions), synthetic=synthetic
+    ):
+        raise ValueError("TMA evaluation report worst-document evidence is malformed")
+    return _CompletedRun(
+        contract=contract, rate=cast(dict[str, Any], rate), executions=executions
+    )
 
 
 def _load_identity_files(
@@ -1461,6 +1600,141 @@ def _valid_counts(value: Any, *, synthetic: bool, document: bool) -> bool:
     if (document and keys not in allowed) or (not document and keys != _COUNT_KEYS):
         return False
     return all(_is_nonnegative_int(item) for item in value.values())
+
+
+def _valid_rate(value: Any, *, synthetic: bool) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if synthetic:
+        return value == {}
+    return (
+        set(value) == _RATE_KEYS
+        and _is_nonnegative_int(value.get("max_input_tokens"))
+        and all(
+            isinstance(value.get(key), str) and bool(value[key].strip())
+            for key in _RATE_KEYS - {"max_input_tokens"}
+        )
+    )
+
+
+def _valid_costs(value: Any, *, synthetic: bool) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if synthetic:
+        return value == {}
+    return (
+        set(value) == _COST_KEYS
+        and all(_is_nonnegative_int(value.get(key)) for key in _COST_INTEGER_KEYS)
+        and all(
+            isinstance(value.get(key), str) and bool(value[key].strip())
+            for key in {"all_predictions_estimated_usd", "new_estimated_usd"}
+        )
+        and all(
+            isinstance(value.get(key), float)
+            and math.isfinite(value[key])
+            and value[key] >= 0
+            for key in {
+                "original_api_latency_median_seconds",
+                "provider_seconds_total",
+            }
+        )
+    )
+
+
+def _valid_price_diagnostics(value: Any, *, synthetic: bool) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if synthetic:
+        return value == {}
+    return set(value) == _PRICE_DIAGNOSTIC_KEYS and all(
+        _is_nonnegative_int(value.get(key)) for key in _PRICE_DIAGNOSTIC_KEYS
+    )
+
+
+def _valid_document_comparisons(document: dict[str, Any], *, synthetic: bool) -> bool:
+    matches = document.get("matches")
+    unmatched_gold = document.get("unmatched_gold")
+    unmatched_predictions = document.get("unmatched_predictions")
+    if not isinstance(matches, list) or not isinstance(unmatched_gold, list) or not isinstance(
+        unmatched_predictions, list
+    ):
+        return False
+    if synthetic and matches != []:
+        return False
+    if any(not isinstance(item, str) or not item.strip() for item in unmatched_gold):
+        return False
+    if any(not isinstance(item, str) or not item.strip() for item in unmatched_predictions):
+        return False
+    return all(_valid_match(item) for item in matches)
+
+
+def _valid_match(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != _MATCH_KEYS:
+        return False
+    if any(
+        not isinstance(value.get(key), bool)
+        for key in {
+            "description_correct",
+            "price_correct",
+            "price_value_correct",
+            "section_correct",
+        }
+    ):
+        return False
+    if any(not _is_nonnegative_int(value.get(key)) for key in {"gold_index", "predicted_index"}):
+        return False
+    if any(not isinstance(value.get(key), str) for key in {"gold_name", "predicted_name"}):
+        return False
+    if any(
+        item is not None and not isinstance(item, str)
+        for item in (
+            value.get("predicted_section"),
+            value.get("price_issue"),
+            value.get("reference_section"),
+        )
+    ):
+        return False
+    score = value.get("score")
+    if not isinstance(score, float) or not math.isfinite(score) or not 0 <= score <= 1:
+        return False
+    return _valid_prices(value.get("predicted_prices")) and _valid_prices(
+        value.get("reference_prices")
+    )
+
+
+def _valid_prices(value: Any) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(price, list)
+        and len(price) == 5
+        and all(isinstance(item, str) for item in price[:3])
+        and price[3] is None
+        and _is_nonnegative_int(price[4])
+        for price in value
+    )
+
+
+def _valid_worst_documents(value: Any, document_ids: set[str], *, synthetic: bool) -> bool:
+    if not isinstance(value, list):
+        return False
+    if synthetic:
+        return value == []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != _WORST_DOCUMENT_KEYS:
+            return False
+        document_id = item.get("document_id")
+        if (
+            not isinstance(document_id, str)
+            or document_id not in document_ids
+            or document_id in seen
+            or any(
+                not _is_nonnegative_int(item.get(key))
+                for key in {"extra", "missing", "price_errors"}
+            )
+        ):
+            return False
+        seen.add(document_id)
+    return seen == document_ids
 
 
 def _valid_optional_provider_metadata(raw: dict[str, Any]) -> bool:

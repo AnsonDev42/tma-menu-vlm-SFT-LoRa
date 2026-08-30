@@ -18,8 +18,9 @@ The return bundle is adapter-only and must contain exactly these roles:
 | `robustness_test_predictions`, `robustness_test_metrics` | Held-out test derivative evidence |
 | `hardware`, `commands` | GPU/runtime facts and replay commands |
 
-The artifact spec also requires model ID/revision, dataset SHA-256, seed, hardware,
-and commands. `menu-vlm bundle` copies only explicit files, hashes each role, and
+The artifact spec also requires model ID/revision, dataset SHA-256, the exact
+dataset-manifest file SHA-256, seed, hardware, and commands. `menu-vlm bundle`
+copies only explicit files, hashes each role, and
 writes `artifact-manifest.json`. Before publishing that manifest, bundling requires
 an exact completed test-gate schema, verifies its typed identity and digest fields,
 and binds all frozen evidence to the copied bundle bytes. The gate's prediction,
@@ -28,12 +29,18 @@ metrics, and Luna prediction SHA-256 values must equal the copied
 checkpoint identity is recomputed from the copied `adapter_config` and
 `adapter_weights` with the evaluation-time directory identity algorithm. The copied
 dataset manifest's dataset SHA-256 must equal both the artifact spec and gate. Its
+copied file SHA-256 must equal the frozen gate identity exactly, so changing split
+assignments, prompt/source provenance, or count allocation while preserving the
+generated-files aggregate still fails. Its
 exact schema and split/source accounting are revalidated, its aggregate is
 recomputed from `files_sha256`, and `files_sha256["test.jsonl"]` must equal the
 gate's reference SHA-256. The copied `luna_response_provenance` role must use its
 fixed name and hash to the approved production aggregate (or the separately pinned,
 explicit synthetic-only aggregate). Paths, symlinks, reserved-name collisions, and
-duplicate source aliases are rejected. Mutating or
+duplicate source aliases are rejected. Its `baseline_prediction_sha256` must equal
+the copied `luna_test_predictions` role as well as the gate's Luna digest, preventing
+a changed baseline plus newly forged gate from bypassing unchanged provenance.
+Mutating or
 replacing any of these roles after test-gate consumption therefore fails bundle
 creation and removes the partial output.
 `menu-vlm package` creates a deterministic tarball,

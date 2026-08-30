@@ -119,6 +119,7 @@ gate_store="$remote_root/frozen-test-gates"
 uv run menu-vlm verify-sidecar --file "$luna_run" --sidecar "$luna_run_sidecar"
 test_args=(evaluate-test --references "$dataset/test.jsonl" --predictions "$run/test.predictions.jsonl"
   --output "$run/test.metrics.json" --dataset-sha256 "$dataset_sha"
+  --dataset-manifest "$dataset/manifest.json"
   --checkpoint "$run/selected-adapter" --gate-store "$gate_store"
   --luna-predictions "$luna_run")
 uv run menu-vlm "${test_args[@]}"
@@ -139,11 +140,12 @@ cp "$dataset/manifest.json" "$run/repro/dataset-manifest.json"
 cp "$run/training/training-report.json" "$run/repro/processor-provenance.json"
 cp "$remote_root/train.log" "$run/training.log"
 python3 - "$run" <<'PY'
-import json, pathlib, sys
+import hashlib, json, pathlib, sys
 run=pathlib.Path(sys.argv[1])
 spec={"schema_version":"1.0","model_id":"Qwen/Qwen3-VL-4B-Instruct",
 "model_revision":"ebb281ec70b05090aa6165b016eac8ec08e71b17",
 "dataset_sha256":json.load(open(run/"repro/dataset-manifest.json"))["dataset_sha256"],
+"dataset_manifest_sha256":hashlib.sha256((run/"repro/dataset-manifest.json").read_bytes()).hexdigest(),
 "seed":20260829,"hardware":{"path":"hardware.txt"},"commands":["commands.txt"],"files":{
 "adapter_config":"selected-adapter/adapter_config.json",
 "adapter_weights":"selected-adapter/adapter_model.safetensors",

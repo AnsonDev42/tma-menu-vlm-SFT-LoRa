@@ -44,6 +44,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             args.output,
             dataset_manifest_path=args.dataset_manifest,
             response_provenance_path=args.response_provenance,
+            luna_predictions_path=args.luna_predictions,
         )
     if args.command == "synthetic-luna-evaluation":
         return create_synthetic_luna_evaluation(args.dataset, args.output)
@@ -119,6 +120,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             args.predictions,
             args.output,
             dataset_sha256=args.dataset_sha256,
+            dataset_manifest=args.dataset_manifest,
             checkpoint=args.checkpoint,
             gate_store=args.gate_store,
             luna_predictions=args.luna_predictions,
@@ -151,6 +153,7 @@ def _parser() -> argparse.ArgumentParser:
     synthetic_artifacts = commands.add_parser("synthetic-artifact-run")
     synthetic_artifacts.add_argument("--dataset-manifest", type=Path, required=True)
     synthetic_artifacts.add_argument("--response-provenance", type=Path, required=True)
+    synthetic_artifacts.add_argument("--luna-predictions", type=Path, required=True)
     synthetic_artifacts.add_argument("--output", type=Path, required=True)
 
     synthetic_luna = commands.add_parser("synthetic-luna-evaluation")
@@ -217,6 +220,7 @@ def _parser() -> argparse.ArgumentParser:
     test = commands.add_parser("evaluate-test")
     _evaluation_args(test, require_luna=True)
     test.add_argument("--dataset-sha256", required=True)
+    test.add_argument("--dataset-manifest", type=Path, required=True)
     test.add_argument("--checkpoint", type=Path, required=True)
     test.add_argument("--gate-store", type=Path, required=True)
 

@@ -745,9 +745,11 @@ def test_on_pod_script_always_verifies_evaluates_and_bundles_luna_baseline() -> 
     assert script.count("verify-sidecar") == 5
     assert 'luna_run="$run/luna-test-predictions.jsonl"' in script
     assert '--luna-predictions "$luna_run"' in script
+    assert '--dataset-manifest "$dataset/manifest.json"' in script
     assert '"luna_test_predictions":"luna-test-predictions.jsonl"' in script
     assert 'provenance_run="$run/luna-response-provenance.json"' in script
     assert '"luna_response_provenance":"luna-response-provenance.json"' in script
+    assert '"dataset_manifest_sha256"' in script
     assert "LUNA_TEST_PREDICTIONS" not in script
 
 

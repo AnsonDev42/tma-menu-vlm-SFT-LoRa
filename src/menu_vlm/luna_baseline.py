@@ -368,8 +368,10 @@ _COUNT_KEYS = {
     "predicted_variants",
     "price_correct",
     "price_false_positive",
+    "price_issue_currency_only",
     "price_issue_different_price_values_or_count",
     "price_issue_missing_prices",
+    "price_issue_option_or_price_label_only",
     "price_targets",
     "price_value_correct",
     "references",
@@ -417,8 +419,10 @@ _COST_INTEGER_KEYS = {
     "unknown_original_costs",
 }
 _PRICE_DIAGNOSTIC_KEYS = {
+    "currency_only",
     "different_price_values_or_count",
     "missing_prices",
+    "option_or_price_label_only",
     "undetected_priced_dishes",
 }
 _WORST_DOCUMENT_KEYS = {"document_id", "extra", "missing", "price_errors"}
@@ -1320,7 +1324,7 @@ def _validate_completed_run(
             not isinstance(item, str) or not item.strip()
             for item in report["release_caveats"]
         )
-        or report.get("by_tag") != {}
+        or not _valid_by_tag(report.get("by_tag"), synthetic=synthetic)
         or not _valid_costs(report.get("costs"), synthetic=synthetic)
         or not _valid_price_diagnostics(
             report.get("price_diagnostics"), synthetic=synthetic
@@ -1508,7 +1512,9 @@ def _read_provider_compact_output(
         raise ValueError(f"TMA call is not a completed extraction: {document_id}")
     if (
         call.get("cost") != evaluation.get("cost")
-        or call.get("rate") != report_rate
+        or not _rates_are_cost_equivalent(
+            call.get("rate"), report_rate, synthetic=synthetic
+        )
         or call.get("elapsed_seconds") != evaluation.get("original_call_seconds")
     ):
         raise ValueError(f"TMA call execution evidence is mismatched: {document_id}")
@@ -2003,8 +2009,9 @@ def _valid_counts(value: Any, *, synthetic: bool, document: bool) -> bool:
     if synthetic:
         return value == {}
     keys = set(value)
-    allowed = (_COUNT_KEYS, _COUNT_KEYS - {"price_issue_missing_prices"})
-    if (document and keys not in allowed) or (not document and keys != _COUNT_KEYS):
+    if not document and keys != _COUNT_KEYS:
+        return False
+    if document and (not keys <= _COUNT_KEYS or not keys):
         return False
     return all(_is_nonnegative_int(item) for item in value.values())
 
@@ -2021,6 +2028,34 @@ def _valid_rate(value: Any, *, synthetic: bool) -> bool:
             isinstance(value.get(key), str) and bool(value[key].strip())
             for key in _RATE_KEYS - {"max_input_tokens"}
         )
+    )
+
+
+def _rates_are_cost_equivalent(
+    call_rate: Any, report_rate: dict[str, Any], *, synthetic: bool
+) -> bool:
+    """Accept renewed snapshots only when every cost-bearing field is unchanged.
+
+    Cached calls retain their original dated snapshot.  A later evaluation may
+    renew descriptive validity metadata while using the identical published
+    token rates.  Keep both snapshots structurally valid and compare all fields
+    that control cost or provider identity.
+    """
+    if synthetic:
+        return bool(call_rate == report_rate == {})
+    if not _valid_rate(call_rate, synthetic=False):
+        return False
+    return all(
+        call_rate.get(key) == report_rate.get(key)
+        for key in {
+            "model",
+            "endpoint",
+            "input_per_million",
+            "cached_input_per_million",
+            "output_per_million",
+            "max_input_tokens",
+            "source",
+        }
     )
 
 
@@ -2055,6 +2090,19 @@ def _valid_price_diagnostics(value: Any, *, synthetic: bool) -> bool:
         return value == {}
     return set(value) == _PRICE_DIAGNOSTIC_KEYS and all(
         _is_nonnegative_int(value.get(key)) for key in _PRICE_DIAGNOSTIC_KEYS
+    )
+
+
+def _valid_by_tag(value: Any, *, synthetic: bool) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if synthetic:
+        return value == {}
+    return all(
+        isinstance(tag, str)
+        and bool(_SAFE_ID.fullmatch(tag))
+        and _valid_metrics(metrics, synthetic=False)
+        for tag, metrics in value.items()
     )
 
 
@@ -2114,7 +2162,7 @@ def _valid_prices(value: Any) -> bool:
         isinstance(price, list)
         and len(price) == 5
         and all(isinstance(item, str) for item in price[:3])
-        and price[3] is None
+        and (price[3] is None or isinstance(price[3], str))
         and _is_nonnegative_int(price[4])
         for price in value
     )
@@ -2141,7 +2189,9 @@ def _valid_worst_documents(value: Any, document_ids: set[str], *, synthetic: boo
         ):
             return False
         seen.add(document_id)
-    return seen == document_ids
+    # The evaluator reports a ranked worst-document window, not necessarily every
+    # document.  Each row is still required to bind to a completed document.
+    return bool(seen) and seen <= document_ids
 
 
 def _valid_optional_provider_metadata(raw: dict[str, Any]) -> bool:

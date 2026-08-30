@@ -298,6 +298,7 @@ _TRUST_ROOT_KEYS = {
     "dataset_manifest_sha256",
     "evaluation_run",
     "baseline_prediction_sha256",
+    "response_provenance_sha256",
     "tma_contract_sha256",
 }
 _METRIC_KEYS = {
@@ -551,6 +552,19 @@ def create_luna_trust_root(
         "dataset_manifest_sha256": sha256_file(dataset_manifest_path),
         "evaluation_run": evaluation_run,
         "baseline_prediction_sha256": baseline_sha256,
+        "response_provenance_sha256": hashlib.sha256(
+            (
+                canonical_json(
+                    _response_provenance_manifest(
+                        evaluation_run,
+                        str(dataset_manifest["dataset_sha256"]),
+                        baseline_sha256,
+                        documents,
+                    )
+                )
+                + "\n"
+            ).encode("utf-8")
+        ).hexdigest(),
         "tma_contract_sha256": _APPROVED_CONTRACT_SHA256,
     }
     try:
@@ -982,6 +996,11 @@ def _load_response_provenance(
     )
     if expected_sha256 is not None and verified["sha256"] != expected_sha256:
         raise ValueError("Luna response provenance does not match the approved trust root")
+    if (
+        trust_root is not None
+        and verified["sha256"] != trust_root.get("response_provenance_sha256")
+    ):
+        raise ValueError("Luna response provenance does not match the private trust root")
     payload = path.read_bytes()
     try:
         value = json.loads(payload)
@@ -1001,6 +1020,18 @@ def _load_response_provenance(
             value, dataset_manifest, evaluation_run, approved_baseline_sha256
         )
     return value
+
+
+def validate_luna_response_provenance(
+    value: dict[str, Any],
+    dataset_manifest: dict[str, Any],
+    evaluation_run: str,
+    approved_baseline_sha256: str | None = None,
+) -> None:
+    """Validate the complete Luna response-provenance record identity."""
+    _validate_response_provenance(
+        value, dataset_manifest, evaluation_run, approved_baseline_sha256
+    )
 
 
 def _validate_response_provenance(
@@ -1092,6 +1123,8 @@ def validate_luna_trust_root(
         or value.get("evaluation_run") != evaluation_run
         or not isinstance(value.get("baseline_prediction_sha256"), str)
         or not _DIGEST.fullmatch(value["baseline_prediction_sha256"])
+        or not isinstance(value.get("response_provenance_sha256"), str)
+        or not _DIGEST.fullmatch(value["response_provenance_sha256"])
         or value.get("tma_contract_sha256") != _APPROVED_CONTRACT_SHA256
     ):
         raise ValueError("Luna trust root does not match the exact dataset, run, or contract")

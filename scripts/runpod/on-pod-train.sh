@@ -199,6 +199,7 @@ spec={"schema_version":"1.0","model_id":"Qwen/Qwen3-VL-4B-Instruct",
 "test_gate":"test-gate.json",
 "hardware":"hardware.txt","commands":"commands.txt"}}
 if sys.argv[2]:
+    spec["files"]["luna_response_provenance_sidecar"]="luna-response-provenance.json.sha256"
     spec["files"]["luna_trust_root"]="luna-trust-root.json"
     spec["files"]["luna_trust_root_sidecar"]="luna-trust-root.json.sha256"
 json.dump(spec, open(run/"artifact-spec.json","w"), sort_keys=True, separators=(",", ":"))

@@ -799,6 +799,10 @@ def test_private_runpod_path_carries_and_bundles_checksummed_luna_trust_root() -
     assert '"$trust_root_name" "$trust_root_sidecar_name"' in launch
     assert 'trust_root_run="$run/luna-trust-root.json"' in on_pod
     assert "menu-vlm verify-luna-trust-root" in on_pod
+    assert (
+        'spec["files"]["luna_response_provenance_sidecar"]='
+        '"luna-response-provenance.json.sha256"'
+    ) in on_pod
     assert 'spec["files"]["luna_trust_root"]="luna-trust-root.json"' in on_pod
     assert (
         'spec["files"]["luna_trust_root_sidecar"]="luna-trust-root.json.sha256"'

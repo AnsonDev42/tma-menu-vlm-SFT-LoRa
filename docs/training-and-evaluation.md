@@ -81,6 +81,10 @@ fails. The gate also records the required Luna prediction SHA-256, while keeping
 the one-shot identity bound to the candidate adapter rather than offering a new
 test attempt when a baseline file changes. A different adapter content hash
 creates a different identity. Use validation—not frozen test—for iteration.
+The returned artifact also carries the fixed-name approved Luna response
+provenance manifest. Bundle creation verifies its aggregate anchor and the exact
+compiled dataset manifest schema/accounting before binding either to the frozen
+gate.
 
 Mac inference is optional. The authoritative run is on the Runpod environment;
 the 16 GB Mac path is limited to build/validation/preflight unless a compatible

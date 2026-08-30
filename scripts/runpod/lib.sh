@@ -30,13 +30,25 @@ validate_training_transfer_names() {
   local archive_name="$1"
   local luna_name="$2"
   local luna_sidecar_name="$3"
+  local provenance_name="$4"
+  local provenance_sidecar_name="$5"
   validate_archive_name "$archive_name"
   validate_archive_name "$luna_name"
   validate_archive_name "$luna_sidecar_name"
+  validate_archive_name "$provenance_name"
+  validate_archive_name "$provenance_sidecar_name"
   [[ "$luna_name" == "luna-test-predictions.jsonl" && \
     "$luna_sidecar_name" == "luna-test-predictions.jsonl.sha256" ]] || \
     runpod_die "Luna baseline files must use the reserved training artifact names"
-  [[ "$archive_name" != "$luna_name" && "$archive_name" != "$luna_sidecar_name" ]] || \
+  [[ "$provenance_name" == "luna-response-provenance.json" && \
+    "$provenance_sidecar_name" == "luna-response-provenance.json.sha256" ]] || \
+    runpod_die "Luna response provenance files must use the reserved training artifact names"
+  local reserved=("$luna_name" "$luna_sidecar_name" "$provenance_name" "$provenance_sidecar_name")
+  local unique
+  unique="$(printf '%s\n' "${reserved[@]}" | sort -u | wc -l | tr -d ' ')"
+  [[ "$unique" == "4" ]] || runpod_die "Reserved Luna training artifact names collide"
+  [[ "$archive_name" != "$luna_name" && "$archive_name" != "$luna_sidecar_name" && \
+    "$archive_name" != "$provenance_name" && "$archive_name" != "$provenance_sidecar_name" ]] || \
     runpod_die "Dataset archive name collides with a reserved Luna artifact name"
 }
 

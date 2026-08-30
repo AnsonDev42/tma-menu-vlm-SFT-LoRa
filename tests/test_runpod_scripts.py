@@ -577,7 +577,7 @@ esac
     ]
 
 
-def test_transfer_requires_and_sends_checksummed_luna_baseline(tmp_path: Path) -> None:
+def test_transfer_requires_and_sends_checksummed_luna_evidence(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     invocation_log = tmp_path / "invocations"
@@ -602,6 +602,13 @@ def test_transfer_requires_and_sends_checksummed_luna_baseline(tmp_path: Path) -
     digest = hashlib.sha256(baseline.read_bytes()).hexdigest()
     sidecar = tmp_path / "luna-test-predictions.jsonl.sha256"
     sidecar.write_text(f"{digest}  {baseline.name}\n", encoding="utf-8")
+    provenance = tmp_path / "luna-response-provenance.json"
+    provenance.write_text('{"synthetic":"provenance"}\n', encoding="utf-8")
+    provenance_digest = hashlib.sha256(provenance.read_bytes()).hexdigest()
+    provenance_sidecar = tmp_path / "luna-response-provenance.json.sha256"
+    provenance_sidecar.write_text(
+        f"{provenance_digest}  {provenance.name}\n", encoding="utf-8"
+    )
     env = {
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
@@ -616,6 +623,8 @@ def test_transfer_requires_and_sends_checksummed_luna_baseline(tmp_path: Path) -
         str(archive),
         str(baseline),
         str(sidecar),
+        str(provenance),
+        str(provenance_sidecar),
         "/workspace/synthetic-run",
         env=env,
     )
@@ -624,10 +633,15 @@ def test_transfer_requires_and_sends_checksummed_luna_baseline(tmp_path: Path) -
     invocations = invocation_log.read_text(encoding="utf-8")
     assert str(baseline) in invocations
     assert str(sidecar) in invocations
+    assert str(provenance) in invocations
+    assert str(provenance_sidecar) in invocations
     assert "/workspace/synthetic-run/incoming/" in invocations
 
 
-def test_transfer_rejects_luna_checksum_drift_before_remote_action(tmp_path: Path) -> None:
+@pytest.mark.parametrize("damaged", ["baseline", "provenance"])
+def test_transfer_rejects_luna_checksum_drift_before_remote_action(
+    tmp_path: Path, damaged: str
+) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     invocation_log = tmp_path / "invocations"
@@ -640,8 +654,19 @@ def test_transfer_rejects_luna_checksum_drift_before_remote_action(tmp_path: Pat
     Path(str(archive) + ".sha256").write_text("synthetic\n", encoding="utf-8")
     baseline = tmp_path / "luna-test-predictions.jsonl"
     baseline.write_text("drift\n", encoding="utf-8")
+    baseline_digest = hashlib.sha256(baseline.read_bytes()).hexdigest()
     sidecar = tmp_path / "luna-test-predictions.jsonl.sha256"
-    sidecar.write_text(f"{'a' * 64}  {baseline.name}\n", encoding="utf-8")
+    sidecar.write_text(f"{baseline_digest}  {baseline.name}\n", encoding="utf-8")
+    provenance = tmp_path / "luna-response-provenance.json"
+    provenance.write_text("{}\n", encoding="utf-8")
+    provenance_digest = hashlib.sha256(provenance.read_bytes()).hexdigest()
+    provenance_sidecar = tmp_path / "luna-response-provenance.json.sha256"
+    provenance_sidecar.write_text(
+        f"{provenance_digest}  {provenance.name}\n", encoding="utf-8"
+    )
+    damaged_file = sidecar if damaged == "baseline" else provenance_sidecar
+    damaged_name = baseline.name if damaged == "baseline" else provenance.name
+    damaged_file.write_text(f"{'a' * 64}  {damaged_name}\n", encoding="utf-8")
     env = {
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
@@ -656,6 +681,8 @@ def test_transfer_rejects_luna_checksum_drift_before_remote_action(tmp_path: Pat
         str(archive),
         str(baseline),
         str(sidecar),
+        str(provenance),
+        str(provenance_sidecar),
         "/workspace/synthetic-run",
         env=env,
     )
@@ -665,7 +692,7 @@ def test_transfer_rejects_luna_checksum_drift_before_remote_action(tmp_path: Pat
     assert not invocation_log.exists()
 
 
-def test_run_training_forwards_required_luna_files_to_remote_job(tmp_path: Path) -> None:
+def test_run_training_forwards_required_luna_evidence_to_remote_job(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     invocation_log = tmp_path / "invocations"
@@ -697,6 +724,8 @@ def test_run_training_forwards_required_luna_files_to_remote_job(tmp_path: Path)
         "dataset.tar.gz",
         "luna-test-predictions.jsonl",
         "luna-test-predictions.jsonl.sha256",
+        "luna-response-provenance.json",
+        "luna-response-provenance.json.sha256",
         str(receipt),
         env=env,
     )
@@ -706,40 +735,69 @@ def test_run_training_forwards_required_luna_files_to_remote_job(tmp_path: Path)
     assert "on-pod-train.sh" in invocation
     assert "luna-test-predictions.jsonl" in invocation
     assert "luna-test-predictions.jsonl.sha256" in invocation
+    assert "luna-response-provenance.json" in invocation
+    assert "luna-response-provenance.json.sha256" in invocation
 
 
 def test_on_pod_script_always_verifies_evaluates_and_bundles_luna_baseline() -> None:
     script = (RUNPOD / "on-pod-train.sh").read_text(encoding="utf-8")
 
-    assert script.count("verify-sidecar") == 3
+    assert script.count("verify-sidecar") == 5
     assert 'luna_run="$run/luna-test-predictions.jsonl"' in script
     assert '--luna-predictions "$luna_run"' in script
     assert '"luna_test_predictions":"luna-test-predictions.jsonl"' in script
+    assert 'provenance_run="$run/luna-response-provenance.json"' in script
+    assert '"luna_response_provenance":"luna-response-provenance.json"' in script
     assert "LUNA_TEST_PREDICTIONS" not in script
 
 
 @pytest.mark.parametrize(
-    ("archive", "baseline", "sidecar"),
+    ("archive", "baseline", "sidecar", "provenance", "provenance_sidecar"),
     [
         (
             "dataset.tar.gz",
             "caller-controlled.jsonl",
             "caller-controlled.jsonl.sha256",
+            "luna-response-provenance.json",
+            "luna-response-provenance.json.sha256",
         ),
         (
             "luna-test-predictions.jsonl",
             "luna-test-predictions.jsonl",
             "luna-test-predictions.jsonl.sha256",
+            "luna-response-provenance.json",
+            "luna-response-provenance.json.sha256",
         ),
         (
             "luna-test-predictions.jsonl.sha256",
             "luna-test-predictions.jsonl",
             "luna-test-predictions.jsonl.sha256",
+            "luna-response-provenance.json",
+            "luna-response-provenance.json.sha256",
+        ),
+        (
+            "luna-response-provenance.json",
+            "luna-test-predictions.jsonl",
+            "luna-test-predictions.jsonl.sha256",
+            "luna-response-provenance.json",
+            "luna-response-provenance.json.sha256",
+        ),
+        (
+            "dataset.tar.gz",
+            "luna-test-predictions.jsonl",
+            "luna-test-predictions.jsonl.sha256",
+            "caller-controlled.json",
+            "luna-response-provenance.json.sha256",
         ),
     ],
 )
 def test_training_rejects_caller_controlled_or_colliding_luna_names_before_remote_action(
-    tmp_path: Path, archive: str, baseline: str, sidecar: str
+    tmp_path: Path,
+    archive: str,
+    baseline: str,
+    sidecar: str,
+    provenance: str,
+    provenance_sidecar: str,
 ) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -764,6 +822,8 @@ def test_training_rejects_caller_controlled_or_colliding_luna_names_before_remot
         archive,
         baseline,
         sidecar,
+        provenance,
+        provenance_sidecar,
         str(receipt),
         env=env,
     )

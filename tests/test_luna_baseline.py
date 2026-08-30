@@ -8,13 +8,32 @@ import pytest
 
 from menu_vlm.compiler import CompileOptions, compile_release
 from menu_vlm.jsonio import canonical_json, read_jsonl, verify_sha256_sidecar
-from menu_vlm.luna_baseline import import_luna_baseline
+from menu_vlm.luna_baseline import (
+    LUNA_RESPONSE_PROVENANCE_NAME,
+    LUNA_RESPONSE_PROVENANCE_SIDECAR_NAME,
+)
+from menu_vlm.luna_baseline import (
+    import_luna_baseline as _import_luna_baseline,
+)
 from menu_vlm.synthetic import create_synthetic_luna_evaluation, create_synthetic_release
 
 
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(canonical_json(value) + "\n", encoding="utf-8")
+
+
+def import_luna_baseline(
+    dataset: Path, tma_data_root: Path, evaluation_run: str, output: Path
+) -> dict[str, object]:
+    return _import_luna_baseline(
+        dataset,
+        tma_data_root,
+        evaluation_run,
+        tma_data_root / LUNA_RESPONSE_PROVENANCE_NAME,
+        tma_data_root / LUNA_RESPONSE_PROVENANCE_SIDECAR_NAME,
+        output,
+    )
 
 
 def _fixture(tmp_path: Path) -> tuple[Path, Path, str, Path, str]:
@@ -138,7 +157,7 @@ def test_import_rejects_cache_key_that_is_not_exact_digest_of_inputs(tmp_path: P
     report["documents"][0]["execution"]["call_path"] = new_call_path
     _write_json(report_path, report)
 
-    with pytest.raises(ValueError, match="cache digest"):
+    with pytest.raises(ValueError, match=r"cache digest|response provenance"):
         import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 
@@ -465,7 +484,9 @@ def test_import_rejects_report_execution_mismatch(tmp_path: Path) -> None:
     report["documents"][0]["execution"]["cache_key"] = "b" * 64
     _write_json(report_path, report)
 
-    with pytest.raises(ValueError, match="execution identity mismatch"):
+    with pytest.raises(
+        ValueError, match=r"execution identity mismatch|response provenance|cache path"
+    ):
         import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 
@@ -479,6 +500,17 @@ def test_import_rejects_report_execution_mismatch(tmp_path: Path) -> None:
         ("document-count-bool", "document accounting is incomplete"),
         ("completed-count-bool", "document accounting is incomplete"),
         ("run-count-bool", "run/report document accounting is mismatched"),
+        ("schema-error", "document metrics are malformed"),
+        ("created-type", "malformed audited metadata"),
+        ("dataset-version-type", "malformed audited metadata"),
+        ("dataset-version-mismatch", "malformed audited metadata"),
+        ("report-metrics-type", "malformed audited metadata"),
+        ("report-metrics-extra", "malformed audited metadata"),
+        ("report-metrics-bool", "malformed audited metadata"),
+        ("document-metrics-type", "document metrics are malformed"),
+        ("document-metrics-extra", "document metrics are malformed"),
+        ("document-metrics-bool", "document metrics are malformed"),
+        ("document-counts-bool", "document metrics are malformed"),
     ],
 )
 def test_import_rejects_malformed_report_shapes(
@@ -504,6 +536,28 @@ def test_import_rejects_malformed_report_shapes(
         report["completed_document_count"] = True
     elif damage == "run-count-bool":
         run["document_count"] = True
+    elif damage == "schema-error":
+        report["documents"][0]["schema_error"] = "forged"
+    elif damage == "created-type":
+        report["created_at"] = 0
+    elif damage == "dataset-version-type":
+        report["dataset_version"] = []
+    elif damage == "dataset-version-mismatch":
+        report["dataset_version"] = run["dataset_version"] = "forged-production-v1"
+    elif damage == "report-metrics-type":
+        report["metrics"] = []
+    elif damage == "report-metrics-extra":
+        report["metrics"]["forged"] = 0.5
+    elif damage == "report-metrics-bool":
+        report["metrics"]["dish_f1"] = True
+    elif damage == "document-metrics-type":
+        report["documents"][0]["metrics"] = []
+    elif damage == "document-metrics-extra":
+        report["documents"][0]["metrics"]["forged"] = 0.5
+    elif damage == "document-metrics-bool":
+        report["documents"][0]["metrics"]["dish_f1"] = True
+    elif damage == "document-counts-bool":
+        report["documents"][0]["counts"]["documents"] = True
     else:  # pragma: no cover - parametrization is exhaustive
         raise AssertionError(damage)
     _write_json(report_path, report)
@@ -559,7 +613,7 @@ def test_import_rejects_non_stop_provider_finish_reason(tmp_path: Path) -> None:
     raw["choices"][0]["finish_reason"] = "length"
     _write_json(raw_path, raw)
 
-    with pytest.raises(ValueError, match="finish with stop"):
+    with pytest.raises(ValueError, match="response provenance"):
         import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 
@@ -572,7 +626,28 @@ def test_import_rejects_top_level_provider_error(tmp_path: Path) -> None:
     raw["error"] = {"type": "synthetic_error"}
     _write_json(raw_path, raw)
 
-    with pytest.raises(ValueError, match="top-level error"):
+    with pytest.raises(ValueError, match="response provenance"):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+@pytest.mark.parametrize("damage", ["zero-bytes", "choice-count", "model-name"])
+def test_import_rejects_raw_only_substitution_before_parse(
+    tmp_path: Path, damage: str
+) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    _prediction, call_path, _result_path = _cache_paths(root, prediction_path)
+    raw_path = call_path.with_name("provider.raw.json")
+    if damage == "zero-bytes":
+        raw_path.write_bytes(b"")
+    else:
+        raw = json.loads(raw_path.read_text(encoding="utf-8"))
+        if damage == "choice-count":
+            raw["choices"].append(json.loads(json.dumps(raw["choices"][0])))
+        else:
+            raw["model"] = "gpt-5.6-luna-substituted"
+        _write_json(raw_path, raw)
+
+    with pytest.raises(ValueError, match="response provenance"):
         import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 
@@ -609,7 +684,7 @@ def test_import_rejects_invalid_provider_envelope(
     raw[field] = value
     _write_json(raw_path, raw)
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="response provenance"):
         import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 
@@ -700,7 +775,7 @@ def test_import_rejects_malformed_provider_evidence(
         raise AssertionError(damage)
     _write_json(raw_path, raw)
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="response provenance"):
         import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 
@@ -718,7 +793,7 @@ def test_import_rejects_combined_malformed_provider_fixture(tmp_path: Path) -> N
     raw["choices"][0]["message"]["unexpected"] = True
     _write_json(raw_path, raw)
 
-    with pytest.raises(ValueError, match="invalid completion envelope"):
+    with pytest.raises(ValueError, match="response provenance"):
         import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 
@@ -731,7 +806,7 @@ def test_import_rejects_malformed_provider_message(tmp_path: Path) -> None:
     raw["choices"][0]["message"] = "not-an-object"
     _write_json(raw_path, raw)
 
-    with pytest.raises(ValueError, match="assistant text content"):
+    with pytest.raises(ValueError, match="response provenance"):
         import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 
@@ -750,7 +825,7 @@ def test_import_rejects_refusal_or_tool_call_content(
     raw["choices"][0]["message"][field] = value
     _write_json(raw_path, raw)
 
-    with pytest.raises(ValueError, match="refusal or tool call"):
+    with pytest.raises(ValueError, match="response provenance"):
         import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 
@@ -803,7 +878,7 @@ def test_import_rejects_invalid_compact_provider_output(
     raw["choices"][0]["message"]["content"] = content
     _write_json(raw_path, raw)
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="response provenance"):
         import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 

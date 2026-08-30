@@ -1,4 +1,6 @@
 import json
+import tempfile
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
@@ -9,7 +11,25 @@ from menu_vlm.artifacts import (
     package_directory,
     verify_archive,
 )
+from menu_vlm.compiler import CompileOptions, compile_release
 from menu_vlm.jsonio import sha256_file, sha256_json
+from menu_vlm.synthetic import create_synthetic_luna_evaluation, create_synthetic_release
+
+
+@lru_cache(maxsize=1)
+def _synthetic_evidence() -> tuple[bytes, bytes]:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        release = root / "release"
+        dataset = root / "dataset"
+        tma = root / "tma"
+        create_synthetic_release(release)
+        compile_release(CompileOptions(release=release, output=dataset))
+        create_synthetic_luna_evaluation(dataset, tma)
+        return (
+            (dataset / "manifest.json").read_bytes(),
+            (tma / "luna-response-provenance.json").read_bytes(),
+        )
 
 
 def _artifact_run(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
@@ -20,17 +40,16 @@ def _artifact_run(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
         path = run / f"{role}.txt"
         path.write_text(f"synthetic {role}\n", encoding="utf-8")
         roles[role] = path.name
-    test_reference_sha256 = "c" * 64
-    dataset_sha256 = "a" * 64
-    (run / roles["dataset_manifest"]).write_text(
-        json.dumps(
-            {
-                "dataset_sha256": dataset_sha256,
-                "files_sha256": {"test.jsonl": test_reference_sha256},
-            }
-        ),
-        encoding="utf-8",
-    )
+    dataset_manifest_bytes, response_provenance_bytes = _synthetic_evidence()
+    (run / roles["dataset_manifest"]).write_bytes(dataset_manifest_bytes)
+    provenance_path = run / roles["luna_response_provenance"]
+    provenance_path = provenance_path.with_name("luna-response-provenance.json")
+    (run / roles["luna_response_provenance"]).unlink()
+    provenance_path.write_bytes(response_provenance_bytes)
+    roles["luna_response_provenance"] = provenance_path.name
+    dataset_manifest = json.loads(dataset_manifest_bytes)
+    test_reference_sha256 = dataset_manifest["files_sha256"]["test.jsonl"]
+    dataset_sha256 = dataset_manifest["dataset_sha256"]
     checkpoint_sha256 = sha256_json(
         {
             "adapter_config.json": sha256_file(run / roles["adapter_config"]),
@@ -85,6 +104,7 @@ def test_artifact_bundle_and_transfer_archive_round_trip(tmp_path: Path) -> None
         "robustness_validation_predictions",
         "robustness_validation_metrics",
         "luna_test_predictions",
+        "luna_response_provenance",
         "test_predictions",
         "test_metrics",
         "robustness_test_predictions",
@@ -135,7 +155,50 @@ def test_artifact_bundle_rejects_evidence_mutated_after_completed_gate(
     assert not (tmp_path / "bundle").exists()
 
 
-@pytest.mark.parametrize("field", ["dataset_sha256", "test.jsonl"])
+def test_artifact_bundle_rejects_mutated_luna_response_provenance(tmp_path: Path) -> None:
+    run, spec, roles = _artifact_run(tmp_path)
+    (run / roles["luna_response_provenance"]).write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="approved anchor"):
+        create_artifact_bundle(run, spec, tmp_path / "bundle")
+    assert not (tmp_path / "bundle").exists()
+
+
+@pytest.mark.parametrize("damage", ["wrong-name", "symlink", "role-collision"])
+def test_artifact_bundle_rejects_provenance_path_aliases_and_collisions(
+    tmp_path: Path, damage: str
+) -> None:
+    run, spec, roles = _artifact_run(tmp_path)
+    provenance = run / roles["luna_response_provenance"]
+    spec_value = json.loads(spec.read_text(encoding="utf-8"))
+    if damage == "wrong-name":
+        renamed = run / "caller-controlled-provenance.json"
+        provenance.rename(renamed)
+        spec_value["files"]["luna_response_provenance"] = renamed.name
+    elif damage == "symlink":
+        target = run / ".private-provenance-target"
+        provenance.rename(target)
+        provenance.symlink_to(target.name)
+    else:
+        spec_value["files"]["adapter_config"] = provenance.name
+    spec.write_text(json.dumps(spec_value), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"reserved filename|filesystem alias|collide"):
+        create_artifact_bundle(run, spec, tmp_path / "bundle")
+    assert not (tmp_path / "bundle").exists()
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "dataset_sha256",
+        "test.jsonl",
+        "train.jsonl",
+        "compiled_records",
+        "release_exclusions",
+        "assignment",
+    ],
+)
 def test_artifact_bundle_rejects_dataset_manifest_mutated_after_completed_gate(
     tmp_path: Path, field: str
 ) -> None:
@@ -144,6 +207,10 @@ def test_artifact_bundle_rejects_dataset_manifest_mutated_after_completed_gate(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if field == "dataset_sha256":
         manifest[field] = "f" * 64
+    elif field in {"compiled_records", "release_exclusions"}:
+        manifest["accounting"][field] += 1
+    elif field == "assignment":
+        manifest["split_assignments"]["forged"] = "train"
     else:
         manifest["files_sha256"][field] = "f" * 64
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")

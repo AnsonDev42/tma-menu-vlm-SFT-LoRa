@@ -13,10 +13,13 @@ from pydantic import ValidationError
 
 from .compiler import validate_compiled_dataset
 from .jsonio import (
+    canonical_json,
     read_json,
     read_jsonl,
     safe_relative,
     sha256_file,
+    verify_sha256_sidecar,
+    write_json,
     write_jsonl,
     write_sha256_sidecar,
 )
@@ -229,6 +232,116 @@ _NOTE_LOCATION_KEYS = {
 _BOUNDING_BOX_KEYS = {"x", "y", "w", "h"}
 _APPROVED_CONTRACT_RESOURCE = "current_tma_contract_v1.json"
 _APPROVED_CONTRACT_SHA256 = "952e255374b961c90949566bc5de8fa92dff2198e7ccfc476a7c6fe1c0818cd6"
+LUNA_RESPONSE_PROVENANCE_NAME = "luna-response-provenance.json"
+LUNA_RESPONSE_PROVENANCE_SIDECAR_NAME = "luna-response-provenance.json.sha256"
+CANONICAL_LUNA_BASELINE_SHA256 = (
+    "320bb246b6844901daa4f32b030d621400a9b0fd9ba8b925eba8b90ea9fa1683"
+)
+APPROVED_LUNA_RESPONSE_PROVENANCE_SHA256 = (
+    "5546ac0106fb4841e7d0f8ad889404380b6ff3af8c000b29c7d0d432388cb62e"
+)
+APPROVED_SYNTHETIC_RESPONSE_PROVENANCE_SHA256 = (
+    "e8423f8534df56db666da46b02d56517c8af8450510925c8be02c254857d7c2f"
+)
+APPROVED_SYNTHETIC_DATASET_SHA256 = (
+    "de593b7ce8617ecfd67227f71ce0349dc1d4314cdb518a06770e8ccb3000d215"
+)
+_PROVENANCE_KEYS = {
+    "format",
+    "schema_version",
+    "evaluation_run",
+    "dataset_sha256",
+    "baseline_prediction_sha256",
+    "documents",
+}
+_PROVENANCE_DOCUMENT_KEYS = {
+    "document_id",
+    "example_id",
+    "image_sha256",
+    "cache_key",
+    "call_path",
+    "provider_response_path",
+    "provider_response_sha256",
+}
+_METRIC_KEYS = {
+    "calorie_accuracy",
+    "description_association",
+    "dish_f1",
+    "dish_hallucination_rate",
+    "dish_name_accuracy",
+    "dish_note_f1",
+    "dish_note_precision",
+    "dish_note_recall",
+    "dish_precision",
+    "dish_price_association",
+    "dish_price_value_association",
+    "dish_recall",
+    "entity_hallucination_rate",
+    "note_f1",
+    "note_precision",
+    "note_recall",
+    "ocr_provenance_coverage",
+    "ocr_provenance_validity",
+    "price_exact_accuracy",
+    "price_precision",
+    "schema_validity",
+    "section_assignment",
+    "section_f1",
+    "section_note_f1",
+    "section_note_precision",
+    "section_note_recall",
+    "section_precision",
+    "section_recall",
+    "variant_association",
+}
+_COUNT_KEYS = {
+    "calorie_correct",
+    "calorie_targets",
+    "description_correct",
+    "description_false_positive",
+    "description_targets",
+    "dish_name_correct",
+    "documents",
+    "evidenced_fields",
+    "gold_dish_notes",
+    "gold_dishes",
+    "gold_notes",
+    "gold_prices",
+    "gold_section_notes",
+    "gold_sections",
+    "matched_dish_notes",
+    "matched_dishes",
+    "matched_entities",
+    "matched_notes",
+    "matched_priced_dishes",
+    "matched_prices",
+    "matched_section_notes",
+    "matched_sections",
+    "matched_variants",
+    "predicted_calories",
+    "predicted_descriptions",
+    "predicted_dish_notes",
+    "predicted_dishes",
+    "predicted_entities",
+    "predicted_notes",
+    "predicted_prices",
+    "predicted_section_notes",
+    "predicted_sections",
+    "predicted_variants",
+    "price_correct",
+    "price_false_positive",
+    "price_issue_different_price_values_or_count",
+    "price_issue_missing_prices",
+    "price_targets",
+    "price_value_correct",
+    "references",
+    "schema_valid",
+    "section_correct",
+    "textual_fields",
+    "valid_references",
+    "variant_correct",
+    "variant_targets",
+}
 
 
 @dataclass(frozen=True)
@@ -236,6 +349,17 @@ class _CompletedRun:
     contract: dict[str, Any]
     rate: dict[str, Any]
     executions: dict[str, dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class _ReplayContext:
+    document_id: str
+    image_sha256: str
+    compiled: dict[str, Any]
+    reference: dict[str, Any]
+    prediction: dict[str, Any]
+    source_image: Path
+    provider_response_sha256: str
 
 
 def approved_luna_runtime_contract() -> dict[str, Any]:
@@ -249,15 +373,103 @@ def approved_luna_runtime_contract() -> dict[str, Any]:
     return value
 
 
+def approved_response_provenance_sha256(dataset_manifest: dict[str, Any]) -> str:
+    if dataset_manifest.get("source_release_version") == "synthetic-v1":
+        if dataset_manifest.get("dataset_sha256") != APPROVED_SYNTHETIC_DATASET_SHA256:
+            raise ValueError("Synthetic response provenance requires the pinned synthetic dataset")
+        return APPROVED_SYNTHETIC_RESPONSE_PROVENANCE_SHA256
+    return APPROVED_LUNA_RESPONSE_PROVENANCE_SHA256
+
+
+def approve_luna_response_provenance(
+    dataset: Path,
+    tma_data_root: Path,
+    evaluation_run: str,
+    canonical_baseline: Path,
+    output: Path,
+) -> dict[str, Any]:
+    """Freeze exact provider-response bytes after reproducing the canonical baseline."""
+    validate_compiled_dataset(dataset)
+    dataset_root = dataset.resolve()
+    dataset_manifest = read_json(dataset_root / "manifest.json")
+    if dataset_manifest.get("source_release_version") == "synthetic-v1":
+        raise ValueError("Production response approval does not accept the synthetic dataset")
+    baseline = canonical_baseline.absolute()
+    baseline_sidecar = baseline.with_suffix(baseline.suffix + ".sha256")
+    if baseline.name != "luna-test-predictions.jsonl":
+        raise ValueError("Canonical Luna baseline must use its reserved fixed filename")
+    _require_unaliased_file(baseline, "canonical Luna baseline")
+    _require_unaliased_file(baseline_sidecar, "canonical Luna baseline sidecar")
+    baseline_check = verify_sha256_sidecar(baseline, baseline_sidecar)
+    if baseline_check["sha256"] != CANONICAL_LUNA_BASELINE_SHA256:
+        raise ValueError("Canonical Luna baseline does not match the independent approval digest")
+    destination, sidecar = _provenance_pair(output, must_exist=False)
+    reserved = {baseline.resolve(), baseline_sidecar.resolve(), destination, sidecar}
+    if len(reserved) != 4:
+        raise ValueError("Response provenance output collides with a reserved evidence file")
+    completed, contexts, documents = _prepare_replay(dataset_root, tma_data_root, evaluation_run)
+    rows = _replay_rows(tma_data_root.resolve(), completed, contexts, documents)
+    reproduced = "".join(canonical_json(row) + "\n" for row in rows).encode("utf-8")
+    if hashlib.sha256(reproduced).hexdigest() != CANONICAL_LUNA_BASELINE_SHA256:
+        raise ValueError("Approved raw responses do not reproduce the canonical Luna baseline")
+    if baseline.read_bytes() != reproduced:
+        raise ValueError("Canonical Luna baseline bytes differ from the approved replay")
+    manifest = _response_provenance_manifest(
+        evaluation_run,
+        str(dataset_manifest["dataset_sha256"]),
+        CANONICAL_LUNA_BASELINE_SHA256,
+        documents,
+    )
+    write_json(destination, manifest)
+    digest = write_sha256_sidecar(destination, sidecar)
+    return {
+        "valid": True,
+        "documents": len(documents),
+        "manifest_sha256": digest,
+        "output": str(destination),
+        "sidecar": str(sidecar),
+    }
+
+
+def write_synthetic_response_provenance(
+    dataset: Path, tma_data_root: Path, evaluation_run: str
+) -> dict[str, Any]:
+    """Create deterministic synthetic-only response provenance for public smoke tests."""
+    validate_compiled_dataset(dataset)
+    dataset_root = dataset.resolve()
+    dataset_manifest = read_json(dataset_root / "manifest.json")
+    if dataset_manifest.get("source_release_version") != "synthetic-v1":
+        raise ValueError("Synthetic response provenance requires the explicit synthetic dataset")
+    destination, sidecar = _provenance_pair(
+        tma_data_root / LUNA_RESPONSE_PROVENANCE_NAME, must_exist=False
+    )
+    completed, contexts, documents = _prepare_replay(dataset_root, tma_data_root, evaluation_run)
+    rows = _replay_rows(tma_data_root.resolve(), completed, contexts, documents)
+    reproduced = "".join(canonical_json(row) + "\n" for row in rows).encode("utf-8")
+    baseline_sha256 = hashlib.sha256(reproduced).hexdigest()
+    manifest = _response_provenance_manifest(
+        evaluation_run,
+        str(dataset_manifest["dataset_sha256"]),
+        baseline_sha256,
+        documents,
+    )
+    write_json(destination, manifest)
+    digest = write_sha256_sidecar(destination, sidecar)
+    return {"manifest": str(destination), "sidecar": str(sidecar), "sha256": digest}
+
+
 def import_luna_baseline(
     dataset: Path,
     tma_data_root: Path,
     evaluation_run: str,
+    response_provenance: Path,
+    response_provenance_sidecar: Path,
     output: Path,
 ) -> dict[str, Any]:
     """Import one completed current-TMA Luna run into the prediction contract."""
     validate_compiled_dataset(dataset)
     dataset_root = dataset.resolve()
+    dataset_manifest = read_json(dataset_root / "manifest.json")
     tma_root = tma_data_root.resolve()
     if not tma_root.is_dir():
         raise ValueError(f"TMA data root is not a directory: {tma_root}")
@@ -267,14 +479,55 @@ def import_luna_baseline(
     sidecar = destination.with_suffix(destination.suffix + ".sha256")
     if destination.exists() or sidecar.exists():
         raise FileExistsError("Luna prediction output or checksum sidecar already exists")
+    provenance_path, provenance_sidecar = _provenance_pair(
+        response_provenance, response_provenance_sidecar, must_exist=True
+    )
+    if len({destination, sidecar, provenance_path, provenance_sidecar}) != 4:
+        raise ValueError("Luna output collides with reserved response provenance evidence")
+    provenance = _load_response_provenance(
+        provenance_path, provenance_sidecar, dataset_manifest, evaluation_run
+    )
 
+    completed, contexts, actual_documents = _prepare_replay(
+        dataset_root, tma_root, evaluation_run
+    )
+    expected_documents = provenance["documents"]
+    if actual_documents != expected_documents:
+        raise ValueError("TMA response provenance does not match the exact replay inventory")
+    rows = _replay_rows(tma_root, completed, contexts, expected_documents)
+
+    try:
+        write_jsonl(destination, rows)
+        digest = write_sha256_sidecar(destination, sidecar)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        sidecar.unlink(missing_ok=True)
+        raise
+    return {
+        "valid": True,
+        "examples": len(rows),
+        "prediction_sha256": digest,
+        "output": str(destination),
+        "sidecar": str(sidecar),
+    }
+
+
+def _prepare_replay(
+    dataset_root: Path, tma_data_root: Path, evaluation_run: str
+) -> tuple[_CompletedRun, list[_ReplayContext], list[dict[str, Any]]]:
+    tma_root = tma_data_root.resolve()
     compiled_by_sha = _compiled_test_by_sha(dataset_root)
     evaluation_root = _exact_relative(
         tma_root, f"evaluation/{evaluation_run}", label="evaluation"
     )
     if not evaluation_root.is_dir():
         raise ValueError(f"TMA evaluation run is not a directory: {evaluation_run}")
-    completed = _validate_completed_run(evaluation_root, evaluation_run)
+    dataset_manifest = read_json(dataset_root / "manifest.json")
+    completed = _validate_completed_run(
+        evaluation_root,
+        evaluation_run,
+        synthetic_dataset=dataset_manifest.get("source_release_version") == "synthetic-v1",
+    )
     document_ids = set(completed.executions)
     references = _load_identity_files(
         _exact_relative(evaluation_root, "references", label="reference directory"),
@@ -286,7 +539,6 @@ def import_luna_baseline(
         document_ids,
         "prediction",
     )
-
     reference_by_sha: dict[str, tuple[str, dict[str, Any]]] = {}
     for document_id, reference in references.items():
         image = reference.get("image")
@@ -303,47 +555,217 @@ def import_luna_baseline(
             "TMA reference images do not exactly match compiled test images; "
             f"missing={missing}, extra={extra}"
         )
-
-    rows: list[dict[str, Any]] = []
+    contexts: list[_ReplayContext] = []
+    documents: list[dict[str, Any]] = []
     for image_sha256, compiled in sorted(
         compiled_by_sha.items(), key=lambda item: str(item[1]["example_id"])
     ):
         document_id, reference = reference_by_sha[image_sha256]
-        source_image = safe_relative(dataset_root, str(compiled["image"]))
+        execution = completed.executions[document_id]
+        cache_key = execution.get("cache_key")
+        call_path = execution.get("call_path")
+        if not isinstance(cache_key, str) or not _DIGEST.fullmatch(cache_key):
+            raise ValueError(f"TMA replay has an invalid cache identity: {document_id}")
+        expected_call = PurePosixPath("baselines", "tma-core", cache_key, "call.json")
+        if not isinstance(call_path, str) or PurePosixPath(call_path) != expected_call:
+            raise ValueError(f"TMA replay has an unsafe or mismatched cache path: {document_id}")
+        provider_response_path = str(expected_call.with_name("provider.raw.json"))
+        raw_file = _exact_relative(tma_root, provider_response_path, label="provider response")
+        if not raw_file.is_file():
+            raise ValueError(f"TMA provider response is missing: {document_id}")
+        raw_sha256 = sha256_file(raw_file)
+        contexts.append(
+            _ReplayContext(
+                document_id=document_id,
+                image_sha256=image_sha256,
+                compiled=compiled,
+                reference=reference,
+                prediction=predictions[document_id],
+                source_image=safe_relative(dataset_root, str(compiled["image"])),
+                provider_response_sha256=raw_sha256,
+            )
+        )
+        documents.append(
+            {
+                "document_id": document_id,
+                "example_id": str(compiled["example_id"]),
+                "image_sha256": image_sha256,
+                "cache_key": cache_key,
+                "call_path": call_path,
+                "provider_response_path": provider_response_path,
+                "provider_response_sha256": raw_sha256,
+            }
+        )
+    return completed, contexts, documents
+
+
+def _replay_rows(
+    tma_root: Path,
+    completed: _CompletedRun,
+    contexts: list[_ReplayContext],
+    documents: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if len(contexts) != len(documents):
+        raise ValueError("TMA response provenance has incomplete replay accounting")
+    rows: list[dict[str, Any]] = []
+    for context, provenance in zip(contexts, documents, strict=True):
         compact, raw_text = _read_provider_compact_output(
             tma_root,
-            predictions[document_id],
-            reference=reference,
-            compiled=compiled,
+            context.prediction,
+            reference=context.reference,
+            compiled=context.compiled,
             report_contract=completed.contract,
             report_rate=completed.rate,
-            report_execution=completed.executions[document_id],
-            document_id=document_id,
-            image_sha256=image_sha256,
-            source_image=source_image,
+            report_execution=completed.executions[context.document_id],
+            document_id=context.document_id,
+            image_sha256=context.image_sha256,
+            source_image=context.source_image,
+            expected_raw_sha256=str(provenance["provider_response_sha256"]),
         )
         rows.append(
             {
-                "example_id": str(compiled["example_id"]),
+                "example_id": str(context.compiled["example_id"]),
                 "prediction": compact,
                 "raw_output": raw_text,
             }
         )
+    return rows
 
-    try:
-        write_jsonl(destination, rows)
-        digest = write_sha256_sidecar(destination, sidecar)
-    except Exception:
-        destination.unlink(missing_ok=True)
-        sidecar.unlink(missing_ok=True)
-        raise
+
+def _response_provenance_manifest(
+    evaluation_run: str,
+    dataset_sha256: str,
+    baseline_prediction_sha256: str,
+    documents: list[dict[str, Any]],
+) -> dict[str, Any]:
     return {
-        "valid": True,
-        "examples": len(rows),
-        "prediction_sha256": digest,
-        "output": str(destination),
-        "sidecar": str(sidecar),
+        "format": "tma-luna-response-provenance-v1",
+        "schema_version": "1.0",
+        "evaluation_run": evaluation_run,
+        "dataset_sha256": dataset_sha256,
+        "baseline_prediction_sha256": baseline_prediction_sha256,
+        "documents": documents,
     }
+
+
+def _load_response_provenance(
+    path: Path,
+    sidecar: Path,
+    dataset_manifest: dict[str, Any],
+    evaluation_run: str,
+) -> dict[str, Any]:
+    verified = verify_sha256_sidecar(path, sidecar)
+    expected_sha256 = approved_response_provenance_sha256(dataset_manifest)
+    if verified["sha256"] != expected_sha256:
+        raise ValueError("Luna response provenance does not match the approved trust root")
+    payload = path.read_bytes()
+    try:
+        value = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Luna response provenance is not valid JSON") from exc
+    if not isinstance(value, dict) or payload != (canonical_json(value) + "\n").encode("utf-8"):
+        raise ValueError("Luna response provenance is not canonical exact JSON")
+    _validate_response_provenance(value, dataset_manifest, evaluation_run)
+    return value
+
+
+def _validate_response_provenance(
+    value: dict[str, Any], dataset_manifest: dict[str, Any], evaluation_run: str
+) -> None:
+    synthetic = dataset_manifest.get("source_release_version") == "synthetic-v1"
+    expected_count = 1 if synthetic else 3
+    if (
+        set(value) != _PROVENANCE_KEYS
+        or value.get("format") != "tma-luna-response-provenance-v1"
+        or value.get("schema_version") != "1.0"
+        or value.get("evaluation_run") != evaluation_run
+        or value.get("dataset_sha256") != dataset_manifest.get("dataset_sha256")
+        or not isinstance(value.get("baseline_prediction_sha256"), str)
+        or not _DIGEST.fullmatch(value["baseline_prediction_sha256"])
+    ):
+        raise ValueError("Luna response provenance has an invalid identity schema")
+    if not synthetic and value["baseline_prediction_sha256"] != CANONICAL_LUNA_BASELINE_SHA256:
+        raise ValueError("Luna response provenance has an unapproved baseline identity")
+    documents = value.get("documents")
+    if not isinstance(documents, list) or len(documents) != expected_count:
+        raise ValueError("Luna response provenance has incorrect document accounting")
+    document_ids: set[str] = set()
+    example_ids: set[str] = set()
+    image_ids: set[str] = set()
+    for document in documents:
+        if not isinstance(document, dict) or set(document) != _PROVENANCE_DOCUMENT_KEYS:
+            raise ValueError("Luna response provenance document has an invalid schema")
+        document_id = document.get("document_id")
+        example_id = document.get("example_id")
+        image_sha256 = document.get("image_sha256")
+        cache_key = document.get("cache_key")
+        call_path = document.get("call_path")
+        provider_path = document.get("provider_response_path")
+        raw_sha256 = document.get("provider_response_sha256")
+        expected_call = PurePosixPath("baselines", "tma-core", str(cache_key), "call.json")
+        if (
+            not isinstance(document_id, str)
+            or not _SAFE_ID.fullmatch(document_id)
+            or not isinstance(example_id, str)
+            or not _SAFE_ID.fullmatch(example_id)
+            or not isinstance(image_sha256, str)
+            or not _DIGEST.fullmatch(image_sha256)
+            or not isinstance(cache_key, str)
+            or not _DIGEST.fullmatch(cache_key)
+            or not isinstance(call_path, str)
+            or PurePosixPath(call_path) != expected_call
+            or not isinstance(provider_path, str)
+            or PurePosixPath(provider_path) != expected_call.with_name("provider.raw.json")
+            or not isinstance(raw_sha256, str)
+            or not _DIGEST.fullmatch(raw_sha256)
+        ):
+            raise ValueError("Luna response provenance document has invalid evidence identity")
+        if (
+            document_id in document_ids
+            or example_id in example_ids
+            or image_sha256 in image_ids
+        ):
+            raise ValueError("Luna response provenance contains duplicate document identity")
+        document_ids.add(document_id)
+        example_ids.add(example_id)
+        image_ids.add(image_sha256)
+    if [document["example_id"] for document in documents] != sorted(example_ids):
+        raise ValueError("Luna response provenance documents are not canonically ordered")
+
+
+def _provenance_pair(
+    path: Path, sidecar: Path | None = None, *, must_exist: bool
+) -> tuple[Path, Path]:
+    manifest_input = path.absolute()
+    checksum_input = (
+        sidecar.absolute()
+        if sidecar is not None
+        else manifest_input.with_name(LUNA_RESPONSE_PROVENANCE_SIDECAR_NAME)
+    )
+    if (
+        manifest_input.name != LUNA_RESPONSE_PROVENANCE_NAME
+        or checksum_input.name != LUNA_RESPONSE_PROVENANCE_SIDECAR_NAME
+        or ".." in manifest_input.parts
+        or ".." in checksum_input.parts
+    ):
+        raise ValueError("Luna response provenance must use the reserved fixed filenames")
+    if manifest_input.is_symlink() or checksum_input.is_symlink():
+        raise ValueError("Luna response provenance paths must not use filesystem aliases")
+    manifest = manifest_input.resolve()
+    checksum = checksum_input.resolve()
+    if checksum != manifest.with_name(LUNA_RESPONSE_PROVENANCE_SIDECAR_NAME):
+        raise ValueError("Luna response provenance must use one fixed-name evidence pair")
+    if must_exist:
+        _require_unaliased_file(manifest, "response provenance manifest")
+        _require_unaliased_file(checksum, "response provenance sidecar")
+    elif manifest.exists() or checksum.exists():
+        raise FileExistsError("Luna response provenance manifest or sidecar already exists")
+    return manifest, checksum
+
+
+def _require_unaliased_file(path: Path, label: str) -> None:
+    if not path.is_file() or path.is_symlink() or path.resolve() != path:
+        raise ValueError(f"TMA {label} must be an unaliased regular file")
 
 
 def _compiled_test_by_sha(dataset_root: Path) -> dict[str, dict[str, Any]]:
@@ -363,13 +785,26 @@ def _compiled_test_by_sha(dataset_root: Path) -> dict[str, dict[str, Any]]:
     return result
 
 
-def _validate_completed_run(evaluation_root: Path, evaluation_run: str) -> _CompletedRun:
+def _validate_completed_run(
+    evaluation_root: Path, evaluation_run: str, *, synthetic_dataset: bool
+) -> _CompletedRun:
     report = read_json(_exact_relative(evaluation_root, "report.json", label="report"))
     run = read_json(_exact_relative(evaluation_root, "run.json", label="run metadata"))
     if not isinstance(report, dict) or not isinstance(run, dict):
         raise ValueError("TMA evaluation metadata must be JSON objects")
     if set(report) != _REPORT_KEYS or set(run) != _RUN_KEYS:
         raise ValueError("TMA evaluation report/run has an unexpected key inventory")
+    synthetic = report.get("dataset_version") == "synthetic-v1"
+    if (
+        not isinstance(report.get("created_at"), str)
+        or not report["created_at"].strip()
+        or not isinstance(report.get("dataset_version"), str)
+        or not report["dataset_version"].strip()
+        or not _valid_metrics(report.get("metrics"), synthetic=synthetic)
+        or not _valid_counts(report.get("counts"), synthetic=synthetic, document=False)
+        or synthetic != synthetic_dataset
+    ):
+        raise ValueError("TMA evaluation report has malformed audited metadata")
     if (
         report.get("run_id") != evaluation_run
         or report.get("status") != "complete"
@@ -411,6 +846,12 @@ def _validate_completed_run(evaluation_root: Path, evaluation_run: str) -> _Comp
             raise ValueError("TMA evaluation report has an invalid document identity")
         if document_id in executions:
             raise ValueError("TMA evaluation report has duplicate document identities")
+        if (
+            document.get("schema_error") is not None
+            or not _valid_metrics(document.get("metrics"), synthetic=synthetic)
+            or not _valid_counts(document.get("counts"), synthetic=synthetic, document=True)
+        ):
+            raise ValueError(f"TMA evaluation report document metrics are malformed: {document_id}")
         execution = document.get("execution")
         if not isinstance(execution, dict):
             raise ValueError(f"TMA report execution is missing: {document_id}")
@@ -479,6 +920,7 @@ def _read_provider_compact_output(
     document_id: str,
     image_sha256: str,
     source_image: Path,
+    expected_raw_sha256: str,
 ) -> tuple[dict[str, Any], str]:
     if set(prediction) != _PREDICTION_KEYS:
         raise ValueError(f"TMA prediction has an unexpected key inventory: {document_id}")
@@ -557,6 +999,8 @@ def _read_provider_compact_output(
     raw_file = _exact_relative(tma_root, str(raw_relative), label="provider response")
     if not raw_file.is_file():
         raise ValueError(f"TMA provider response is missing: {document_id}")
+    if sha256_file(raw_file) != expected_raw_sha256:
+        raise ValueError(f"TMA provider response bytes are not approved: {document_id}")
     raw = read_json(raw_file)
     if not isinstance(raw, dict):
         raise ValueError(f"TMA provider response must be a JSON object: {document_id}")
@@ -994,6 +1438,29 @@ def _is_nonnegative_number(value: Any) -> bool:
         and math.isfinite(value)
         and value >= 0
     )
+
+
+def _valid_metrics(value: Any, *, synthetic: bool) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if synthetic:
+        return value == {}
+    return set(value) == _METRIC_KEYS and all(
+        item is None or (_is_nonnegative_number(item) and item <= 1)
+        for item in value.values()
+    )
+
+
+def _valid_counts(value: Any, *, synthetic: bool, document: bool) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if synthetic:
+        return value == {}
+    keys = set(value)
+    allowed = (_COUNT_KEYS, _COUNT_KEYS - {"price_issue_missing_prices"})
+    if (document and keys not in allowed) or (not document and keys != _COUNT_KEYS):
+        return False
+    return all(_is_nonnegative_int(item) for item in value.values())
 
 
 def _valid_optional_provider_metadata(raw: dict[str, Any]) -> bool:

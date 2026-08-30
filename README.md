@@ -71,10 +71,18 @@ export MENU_COMPILED_PATH=/absolute/private/qwen3-vl-sft-v1
 
 uv run menu-vlm validate-release --release "$MENU_DATASET_PATH"
 uv run menu-vlm compile --release "$MENU_DATASET_PATH" --output "$MENU_COMPILED_PATH"
+uv run menu-vlm approve-luna-response-provenance \
+  --dataset "$MENU_COMPILED_PATH" \
+  --tma-data-root /absolute/private/tma-menu-parser-data \
+  --evaluation-run COMPLETED_CURRENT_LUNA_RUN \
+  --canonical-baseline /absolute/private/luna-test-predictions.jsonl \
+  --output /absolute/private/luna-response-provenance.json
 uv run menu-vlm import-luna-baseline \
   --dataset "$MENU_COMPILED_PATH" \
   --tma-data-root /absolute/private/tma-menu-parser-data \
   --evaluation-run COMPLETED_CURRENT_LUNA_RUN \
+  --response-provenance /absolute/private/luna-response-provenance.json \
+  --response-provenance-sidecar /absolute/private/luna-response-provenance.json.sha256 \
   --output /absolute/private/luna-test-predictions.jsonl
 uv run menu-vlm package --source "$MENU_COMPILED_PATH" \
   --archive /absolute/private/qwen3-vl-sft-v1.tar.gz

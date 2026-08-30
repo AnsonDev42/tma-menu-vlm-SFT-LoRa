@@ -5,8 +5,19 @@ import tarfile
 from pathlib import Path
 from typing import Any
 
-from .constants import MODEL_ID, MODEL_REVISION
+from .constants import (
+    DATASET_FORMAT,
+    MODEL_ID,
+    MODEL_REVISION,
+    PROMPT_VERSION,
+    RELEASE_FORMAT,
+    SPLITS,
+)
 from .jsonio import read_json, safe_relative, sha256_file, sha256_json, write_json
+from .luna_baseline import (
+    LUNA_RESPONSE_PROVENANCE_NAME,
+    approved_response_provenance_sha256,
+)
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _TEST_GATE_KEYS = {
@@ -42,6 +53,7 @@ REQUIRED_ARTIFACT_ROLES = frozenset(
         "robustness_validation_predictions",
         "robustness_validation_metrics",
         "luna_test_predictions",
+        "luna_response_provenance",
         "test_predictions",
         "test_metrics",
         "robustness_test_predictions",
@@ -82,10 +94,19 @@ def create_artifact_bundle(run_root: Path, spec_path: Path, output: Path) -> dic
     destination.mkdir(parents=True, exist_ok=True)
     try:
         manifest_files: dict[str, dict[str, str]] = {}
+        copied_sources: set[Path] = set()
         for role, relative in sorted(files.items()):
             source = safe_relative(root, str(relative))
+            expected_source = root / str(relative)
+            if source != expected_source or source.is_symlink():
+                raise ValueError(f"Artifact role uses a filesystem alias: {role}={relative}")
             if not source.is_file():
                 raise ValueError(f"Artifact role is not a file: {role}={relative}")
+            if source in copied_sources:
+                raise ValueError(f"Artifact roles collide on one source file: {role}={relative}")
+            copied_sources.add(source)
+            if role == "luna_response_provenance" and source.name != LUNA_RESPONSE_PROVENANCE_NAME:
+                raise ValueError("Luna response provenance role must use its reserved filename")
             bundled_relative = f"files/{role}/{source.name}"
             target = destination / bundled_relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -162,9 +183,8 @@ def _validate_test_gate(
 
     dataset_manifest_path = Path(manifest_files["dataset_manifest"]["path"])
     dataset_manifest = read_json(gate_path.parent.parent.parent / dataset_manifest_path)
-    files_sha256 = (
-        dataset_manifest.get("files_sha256") if isinstance(dataset_manifest, dict) else None
-    )
+    _validate_compiled_dataset_manifest(dataset_manifest)
+    files_sha256 = dataset_manifest["files_sha256"]
     if (
         not isinstance(dataset_manifest, dict)
         or dataset_manifest.get("dataset_sha256") != spec.get("dataset_sha256")
@@ -173,6 +193,138 @@ def _validate_test_gate(
         or files_sha256.get("test.jsonl") != gate.get("reference_sha256")
     ):
         raise ValueError("Artifact dataset manifest does not match the completed test gate")
+    if (
+        manifest_files["luna_response_provenance"]["sha256"]
+        != approved_response_provenance_sha256(dataset_manifest)
+    ):
+        raise ValueError("Artifact Luna response provenance does not match the approved anchor")
+    provenance_path = Path(manifest_files["luna_response_provenance"]["path"])
+    provenance = read_json(gate_path.parent.parent.parent / provenance_path)
+    if (
+        not isinstance(provenance, dict)
+        or provenance.get("dataset_sha256") != dataset_manifest.get("dataset_sha256")
+    ):
+        raise ValueError("Artifact Luna response provenance does not match the dataset identity")
+
+
+def _validate_compiled_dataset_manifest(value: Any) -> None:
+    keys = {
+        "format",
+        "schema_version",
+        "source_release_format",
+        "source_release_version",
+        "source_release_manifest_sha256",
+        "source_release_splits_preserved",
+        "split_seed",
+        "split_assignments",
+        "prompt",
+        "one_image_per_example",
+        "counts",
+        "accounting",
+        "files",
+        "files_sha256",
+        "dataset_sha256",
+    }
+    expected_files = {
+        "train": "train.jsonl",
+        "validation": "validation.jsonl",
+        "test": "test.jsonl",
+        "robustness_validation": "robustness_validation.jsonl",
+        "robustness_test": "robustness_test.jsonl",
+    }
+    count_keys = set(expected_files) | {"excluded", "projection_failures"}
+    if not isinstance(value, dict) or set(value) != keys:
+        raise ValueError("Artifact dataset manifest has an unexpected schema")
+    files_sha256 = value.get("files_sha256")
+    dataset_sha256 = value.get("dataset_sha256")
+    counts = value.get("counts")
+    accounting = value.get("accounting")
+    assignments = value.get("split_assignments")
+    prompt = value.get("prompt")
+    split_seed = value.get("split_seed")
+    input_records = accounting.get("input_records") if isinstance(accounting, dict) else None
+    safe_input_records: int = (
+        input_records
+        if isinstance(input_records, int) and not isinstance(input_records, bool)
+        else -1
+    )
+    release_exclusions = (
+        accounting.get("release_exclusions") if isinstance(accounting, dict) else None
+    )
+    safe_release_exclusions: int = (
+        release_exclusions
+        if isinstance(release_exclusions, int) and not isinstance(release_exclusions, bool)
+        else -1
+    )
+    required_hashed_files = set(expected_files.values()) | {
+        "excluded.json",
+        "projection-failures.json",
+        "split-manifest.json",
+    }
+    image_hashes = (
+        {relative for relative in files_sha256 if relative.startswith("images/")}
+        if isinstance(files_sha256, dict)
+        else set()
+    )
+    if (
+        value.get("format") != DATASET_FORMAT
+        or value.get("schema_version") != "1.0"
+        or value.get("source_release_format") != RELEASE_FORMAT
+        or not isinstance(value.get("source_release_version"), str)
+        or not value["source_release_version"]
+        or not _is_digest(value.get("source_release_manifest_sha256"))
+        or not isinstance(value.get("source_release_splits_preserved"), bool)
+        or not (split_seed is None or _is_nonnegative_int(split_seed))
+        or not isinstance(assignments, dict)
+        or len(assignments) != safe_input_records + safe_release_exclusions
+        or any(
+            not isinstance(key, str) or not key or item not in SPLITS
+            for key, item in assignments.items()
+        )
+        or not isinstance(prompt, dict)
+        or set(prompt) != {"version", "sha256"}
+        or prompt.get("version") != PROMPT_VERSION
+        or not _is_digest(prompt.get("sha256"))
+        or value.get("one_image_per_example") is not True
+        or not isinstance(counts, dict)
+        or set(counts) != count_keys
+        or any(not _is_nonnegative_int(item) for item in counts.values())
+        or not isinstance(accounting, dict)
+        or set(accounting) != {"input_records", "compiled_records", "release_exclusions"}
+        or any(not _is_nonnegative_int(item) for item in accounting.values())
+        or accounting.get("compiled_records")
+        != sum(counts[name] for name in expected_files)
+        or accounting.get("input_records")
+        != int(accounting["compiled_records"]) + int(counts["projection_failures"])
+        or accounting.get("release_exclusions") != counts.get("excluded")
+        or value.get("files") != expected_files
+        or not isinstance(files_sha256, dict)
+        or not files_sha256
+        or not required_hashed_files.issubset(files_sha256)
+        or len(image_hashes) != accounting.get("compiled_records")
+        or set(files_sha256) != required_hashed_files | image_hashes
+        or any(
+            not isinstance(relative, str)
+            or not relative
+            or Path(relative).is_absolute()
+            or ".." in Path(relative).parts
+            or not _is_digest(digest)
+            for relative, digest in files_sha256.items()
+        )
+        or not _is_digest(dataset_sha256)
+        or sha256_json(files_sha256) != dataset_sha256
+        or (value.get("source_release_splits_preserved") is True and split_seed is not None)
+        or (value.get("source_release_splits_preserved") is False and split_seed is None)
+    ):
+        raise ValueError("Artifact dataset manifest has malformed audited evidence")
+
+
+def _is_digest(value: Any) -> bool:
+    return isinstance(value, str) and _DIGEST.fullmatch(value) is not None
+
+
+def _is_nonnegative_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def package_directory(source: Path, archive: Path) -> dict[str, Any]:

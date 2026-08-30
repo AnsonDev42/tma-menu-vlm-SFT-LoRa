@@ -13,6 +13,7 @@ The return bundle is adapter-only and must contain exactly these roles:
 | `selected_validation_predictions`, `selected_validation_metrics` | Canonical selected-checkpoint validation evidence |
 | `robustness_validation_predictions`, `robustness_validation_metrics` | Held-out validation derivative evidence |
 | `luna_test_predictions` | Imported current-TMA Luna predictions from the fixed `luna-test-predictions.jsonl` run path used for the frozen comparison |
+| `luna_response_provenance` | Approved fixed-name private manifest binding each Luna prediction to exact provider raw-response bytes |
 | `test_predictions`, `test_metrics`, `test_gate` | Frozen primary test evidence and durable identity gate |
 | `robustness_test_predictions`, `robustness_test_metrics` | Held-out test derivative evidence |
 | `hardware`, `commands` | GPU/runtime facts and replay commands |
@@ -26,8 +27,13 @@ metrics, and Luna prediction SHA-256 values must equal the copied
 `test_predictions`, `test_metrics`, and `luna_test_predictions` roles. The gate's
 checkpoint identity is recomputed from the copied `adapter_config` and
 `adapter_weights` with the evaluation-time directory identity algorithm. The copied
-dataset manifest's dataset SHA-256 must equal both the artifact spec and gate, and
-its `files_sha256["test.jsonl"]` must equal the gate's reference SHA-256. Mutating or
+dataset manifest's dataset SHA-256 must equal both the artifact spec and gate. Its
+exact schema and split/source accounting are revalidated, its aggregate is
+recomputed from `files_sha256`, and `files_sha256["test.jsonl"]` must equal the
+gate's reference SHA-256. The copied `luna_response_provenance` role must use its
+fixed name and hash to the approved production aggregate (or the separately pinned,
+explicit synthetic-only aggregate). Paths, symlinks, reserved-name collisions, and
+duplicate source aliases are rejected. Mutating or
 replacing any of these roles after test-gate consumption therefore fails bundle
 creation and removes the partial output.
 `menu-vlm package` creates a deterministic tarball,

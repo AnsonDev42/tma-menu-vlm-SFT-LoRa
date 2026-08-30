@@ -8,7 +8,7 @@ from .compiler import CompileOptions, compile_release, validate_compiled_dataset
 from .constants import REPOSITORY_ROOT
 from .evaluation import evaluate_files, evaluate_test_once, select_checkpoint
 from .jsonio import canonical_json, verify_sha256_sidecar, write_json
-from .luna_baseline import import_luna_baseline
+from .luna_baseline import approve_luna_response_provenance, import_luna_baseline
 from .prediction import predict_dataset
 from .privacy import scan_public_repository
 from .release import validate_release
@@ -41,13 +41,28 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         return create_reordered_predictions(args.references, args.output)
     if args.command == "synthetic-artifact-run":
         return create_synthetic_artifact_run(
-            args.output, dataset_manifest_path=args.dataset_manifest
+            args.output,
+            dataset_manifest_path=args.dataset_manifest,
+            response_provenance_path=args.response_provenance,
         )
     if args.command == "synthetic-luna-evaluation":
         return create_synthetic_luna_evaluation(args.dataset, args.output)
     if args.command == "import-luna-baseline":
         return import_luna_baseline(
-            args.dataset, args.tma_data_root, args.evaluation_run, args.output
+            args.dataset,
+            args.tma_data_root,
+            args.evaluation_run,
+            args.response_provenance,
+            args.response_provenance_sidecar,
+            args.output,
+        )
+    if args.command == "approve-luna-response-provenance":
+        return approve_luna_response_provenance(
+            args.dataset,
+            args.tma_data_root,
+            args.evaluation_run,
+            args.canonical_baseline,
+            args.output,
         )
     if args.command == "validate-release":
         release = validate_release(args.release, allow_unsplit=args.allow_unsplit)
@@ -135,6 +150,7 @@ def _parser() -> argparse.ArgumentParser:
 
     synthetic_artifacts = commands.add_parser("synthetic-artifact-run")
     synthetic_artifacts.add_argument("--dataset-manifest", type=Path, required=True)
+    synthetic_artifacts.add_argument("--response-provenance", type=Path, required=True)
     synthetic_artifacts.add_argument("--output", type=Path, required=True)
 
     synthetic_luna = commands.add_parser("synthetic-luna-evaluation")
@@ -145,7 +161,16 @@ def _parser() -> argparse.ArgumentParser:
     luna.add_argument("--dataset", type=Path, required=True)
     luna.add_argument("--tma-data-root", type=Path, required=True)
     luna.add_argument("--evaluation-run", required=True)
+    luna.add_argument("--response-provenance", type=Path, required=True)
+    luna.add_argument("--response-provenance-sidecar", type=Path, required=True)
     luna.add_argument("--output", type=Path, required=True)
+
+    approval = commands.add_parser("approve-luna-response-provenance")
+    approval.add_argument("--dataset", type=Path, required=True)
+    approval.add_argument("--tma-data-root", type=Path, required=True)
+    approval.add_argument("--evaluation-run", required=True)
+    approval.add_argument("--canonical-baseline", type=Path, required=True)
+    approval.add_argument("--output", type=Path, required=True)
 
     validate_release_parser = commands.add_parser("validate-release")
     validate_release_parser.add_argument("--release", type=Path, required=True)

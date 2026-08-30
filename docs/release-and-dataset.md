@@ -73,7 +73,9 @@ compiles are byte-identical.
 ## Imported current-Luna test baseline
 
 `menu-vlm import-luna-baseline` takes the compiled dataset, an explicit TMA data
-root, and a completed evaluation run ID. It requires the run/report model to be
+root, a completed evaluation run ID, and the approved fixed-name private
+`luna-response-provenance.json` plus its checksum sidecar. It requires the
+run/report model to be
 `current-tma-core:gpt-5.6-luna`, exact completed document/reference/prediction
 accounting, and a one-to-one image SHA-256 match with compiled `test.jsonl`.
 
@@ -104,8 +106,15 @@ from the bound compiled source image with the approved current-TMA processor;
 copied or fabricated processed-image evidence fails. Report, document, execution,
 prediction-execution, and call records also use their exact audited key inventories
 and reject booleans, strings, and floats in integer result IDs and page-index
-fields. Only the
-sibling `provider.raw.json` is read, and it must be an error-free typed
+fields. Before any provider response is parsed, the importer verifies the exact
+raw bytes against the approved provenance manifest. That canonical manifest is
+checksum verified, must match the public production aggregate anchor, and binds
+all and only the compiled test/report documents one-to-one by image hash, cache
+key, exact call and raw-response paths, call identity, and raw-response SHA-256.
+There is no production fallback. Approval generation independently reproduces
+the predictions and requires the canonical fixed baseline digest before writing
+the private manifest and sidecar. Private paths and per-document hashes remain
+outside Git. Only the sibling `provider.raw.json` is read, and it must be an error-free typed
 OpenAI 3.0.0 `ChatCompletion` envelope parsed in strict mode with Pydantic 2.13.4,
 the approved exact model, null logprobs, nonnegative
 token accounting, approved service-tier values, exact typed URL-citation
@@ -113,8 +122,14 @@ annotations, no moderation payload, allowed envelope/choice/message keys, and
 exactly one index-zero stopped Luna assistant text response. Refusal or
 tool/function calls fail, and
 the reference OCR and compact JSON are also parsed in strict mode, and the compact
-output must reference only the compiled OCR line range.
+output must reference only the compiled OCR line range. Completed-run metadata is
+also closed: `schema_error` is null, timestamps and dataset versions are strings,
+and overall/per-document metrics and count objects have the approved exact typed
+schemas with bool-safe integer accounting.
 
 The importer writes prediction JSONL ordered by compiled example ID and an exact
 `<output>.sha256` sidecar. Both are private test evidence: keep them outside Git,
-transfer them directly to the pod, and return the JSONL in the adapter bundle.
+transfer them directly to the pod together with the private provenance manifest,
+and return both fixed-name files in the adapter bundle. The public synthetic smoke
+uses a separate pinned synthetic-only provenance aggregate accepted only for the
+explicit public synthetic dataset version.

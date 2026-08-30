@@ -17,7 +17,10 @@ from .jsonio import (
     write_json,
     write_jsonl,
 )
-from .luna_baseline import approved_luna_runtime_contract
+from .luna_baseline import (
+    approved_luna_runtime_contract,
+    write_synthetic_response_provenance,
+)
 from .tma_image import process_tma_image
 
 
@@ -172,7 +175,9 @@ def create_reordered_predictions(references: Path, output: Path) -> dict[str, An
     return {"examples": len(rows), "output": str(output)}
 
 
-def create_synthetic_artifact_run(output: Path, *, dataset_manifest_path: Path) -> dict[str, Any]:
+def create_synthetic_artifact_run(
+    output: Path, *, dataset_manifest_path: Path, response_provenance_path: Path
+) -> dict[str, Any]:
     root = output.resolve()
     if root.exists() and any(root.iterdir()):
         raise FileExistsError(f"Synthetic artifact run is not empty: {root}")
@@ -180,10 +185,16 @@ def create_synthetic_artifact_run(output: Path, *, dataset_manifest_path: Path) 
     dataset_manifest = read_json(dataset_manifest_path)
     files = {}
     for role in sorted(REQUIRED_ARTIFACT_ROLES):
-        path = root / f"{role}.synthetic.txt"
+        name = (
+            "luna-response-provenance.json"
+            if role == "luna_response_provenance"
+            else f"{role}.synthetic.txt"
+        )
+        path = root / name
         path.write_text(f"public synthetic {role}\n", encoding="utf-8")
         files[role] = path.name
     shutil.copyfile(dataset_manifest_path, root / files["dataset_manifest"])
+    shutil.copyfile(response_provenance_path, root / files["luna_response_provenance"])
     checkpoint_sha256 = sha256_json(
         {
             "adapter_config.json": sha256_file(root / files["adapter_config"]),
@@ -452,7 +463,14 @@ def create_synthetic_luna_evaluation(dataset: Path, output: Path) -> dict[str, A
             },
         )
         write_json(evaluation / "run.json", metadata)
-        return {"output": str(root), "evaluation_run": run_id, "documents": len(documents)}
+        provenance = write_synthetic_response_provenance(dataset_root, root, run_id)
+        return {
+            "output": str(root),
+            "evaluation_run": run_id,
+            "documents": len(documents),
+            "response_provenance": provenance["manifest"],
+            "response_provenance_sidecar": provenance["sidecar"],
+        }
     except Exception:
         shutil.rmtree(root, ignore_errors=True)
         raise

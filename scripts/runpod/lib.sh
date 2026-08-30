@@ -32,6 +32,8 @@ validate_training_transfer_names() {
   local luna_sidecar_name="$3"
   local provenance_name="$4"
   local provenance_sidecar_name="$5"
+  local trust_root_name="${6:-}"
+  local trust_root_sidecar_name="${7:-}"
   validate_archive_name "$archive_name"
   validate_archive_name "$luna_name"
   validate_archive_name "$luna_sidecar_name"
@@ -43,12 +45,24 @@ validate_training_transfer_names() {
   [[ "$provenance_name" == "luna-response-provenance.json" && \
     "$provenance_sidecar_name" == "luna-response-provenance.json.sha256" ]] || \
     runpod_die "Luna response provenance files must use the reserved training artifact names"
+  if [[ -n "$trust_root_name" || -n "$trust_root_sidecar_name" ]]; then
+    validate_archive_name "$trust_root_name"
+    validate_archive_name "$trust_root_sidecar_name"
+    [[ "$trust_root_name" == "luna-trust-root.json" && \
+      "$trust_root_sidecar_name" == "luna-trust-root.json.sha256" ]] || \
+      runpod_die "Luna trust root files must use the reserved training artifact names"
+  fi
   local reserved=("$luna_name" "$luna_sidecar_name" "$provenance_name" "$provenance_sidecar_name")
+  [[ -z "$trust_root_name" ]] || reserved+=("$trust_root_name" "$trust_root_sidecar_name")
   local unique
   unique="$(printf '%s\n' "${reserved[@]}" | sort -u | wc -l | tr -d ' ')"
-  [[ "$unique" == "4" ]] || runpod_die "Reserved Luna training artifact names collide"
+  [[ "$unique" == "${#reserved[@]}" ]] || \
+    runpod_die "Reserved Luna training artifact names collide"
   [[ "$archive_name" != "$luna_name" && "$archive_name" != "$luna_sidecar_name" && \
     "$archive_name" != "$provenance_name" && "$archive_name" != "$provenance_sidecar_name" ]] || \
+    runpod_die "Dataset archive name collides with a reserved Luna artifact name"
+  [[ -z "$trust_root_name" || \
+    ("$archive_name" != "$trust_root_name" && "$archive_name" != "$trust_root_sidecar_name") ]] || \
     runpod_die "Dataset archive name collides with a reserved Luna artifact name"
 }
 

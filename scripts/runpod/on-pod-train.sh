@@ -4,8 +4,8 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/lib.sh"
 
-if [[ $# -ne 6 ]]; then
-  runpod_die "usage: $0 REMOTE_ROOT ARCHIVE_NAME LUNA_BASELINE_NAME LUNA_BASELINE_SHA256_NAME LUNA_RESPONSE_PROVENANCE_NAME LUNA_RESPONSE_PROVENANCE_SHA256_NAME"
+if [[ $# -ne 6 && $# -ne 8 ]]; then
+  runpod_die "usage: $0 REMOTE_ROOT ARCHIVE_NAME LUNA_BASELINE_NAME LUNA_BASELINE_SHA256_NAME LUNA_RESPONSE_PROVENANCE_NAME LUNA_RESPONSE_PROVENANCE_SHA256_NAME [LUNA_TRUST_ROOT_NAME LUNA_TRUST_ROOT_SHA256_NAME]"
 fi
 remote_root="$1"
 archive_name="$2"
@@ -13,10 +13,13 @@ luna_baseline_name="$3"
 luna_baseline_sidecar_name="$4"
 provenance_name="$5"
 provenance_sidecar_name="$6"
+trust_root_name="${7:-}"
+trust_root_sidecar_name="${8:-}"
 validate_remote_root "$remote_root"
 validate_training_transfer_names \
   "$archive_name" "$luna_baseline_name" "$luna_baseline_sidecar_name" \
-  "$provenance_name" "$provenance_sidecar_name"
+  "$provenance_name" "$provenance_sidecar_name" \
+  "$trust_root_name" "$trust_root_sidecar_name"
 project="$remote_root/project"
 archive="$remote_root/incoming/$archive_name"
 dataset="$remote_root/private-dataset"
@@ -30,6 +33,16 @@ provenance_incoming="$remote_root/incoming/$provenance_name"
 provenance_sidecar_incoming="$remote_root/incoming/$provenance_sidecar_name"
 provenance_run="$run/luna-response-provenance.json"
 provenance_run_sidecar="$run/luna-response-provenance.json.sha256"
+trust_root_incoming=""
+trust_root_sidecar_incoming=""
+trust_root_run=""
+trust_root_run_sidecar=""
+if [[ -n "$trust_root_name" ]]; then
+  trust_root_incoming="$remote_root/incoming/$trust_root_name"
+  trust_root_sidecar_incoming="$remote_root/incoming/$trust_root_sidecar_name"
+  trust_root_run="$run/luna-trust-root.json"
+  trust_root_run_sidecar="$run/luna-trust-root.json.sha256"
+fi
 
 export HF_HOME="$remote_root/hf-cache"
 python3 -m pip install --break-system-packages "uv==0.12.6"
@@ -40,16 +53,36 @@ uv run menu-vlm verify-sidecar --file "$luna_incoming" \
   --sidecar "$luna_sidecar_incoming"
 uv run menu-vlm verify-sidecar --file "$provenance_incoming" \
   --sidecar "$provenance_sidecar_incoming"
+if [[ -n "$trust_root_incoming" ]]; then
+  uv run menu-vlm verify-sidecar --file "$trust_root_incoming" \
+    --sidecar "$trust_root_sidecar_incoming"
+fi
 uv run menu-vlm verify-archive --archive "$archive" --output "$dataset"
 uv run menu-vlm validate-dataset --dataset "$dataset"
+if [[ -n "$trust_root_incoming" ]]; then
+  uv run menu-vlm verify-luna-trust-root --dataset "$dataset" \
+    --baseline "$luna_incoming" --baseline-sidecar "$luna_sidecar_incoming" \
+    --response-provenance "$provenance_incoming" \
+    --response-provenance-sidecar "$provenance_sidecar_incoming" \
+    --trust-root "$trust_root_incoming" \
+    --trust-root-sidecar "$trust_root_sidecar_incoming"
+fi
 uv run menu-vlm preflight --config "$config" --dataset "$dataset"
 mkdir -p "$run/evaluations" "$run/repro"
 cp "$luna_incoming" "$luna_run"
 cp "$luna_sidecar_incoming" "$luna_run_sidecar"
 cp "$provenance_incoming" "$provenance_run"
 cp "$provenance_sidecar_incoming" "$provenance_run_sidecar"
+if [[ -n "$trust_root_incoming" ]]; then
+  cp "$trust_root_incoming" "$trust_root_run"
+  cp "$trust_root_sidecar_incoming" "$trust_root_run_sidecar"
+fi
 uv run menu-vlm verify-sidecar --file "$luna_run" --sidecar "$luna_run_sidecar"
 uv run menu-vlm verify-sidecar --file "$provenance_run" --sidecar "$provenance_run_sidecar"
+if [[ -n "$trust_root_run" ]]; then
+  uv run menu-vlm verify-sidecar --file "$trust_root_run" \
+    --sidecar "$trust_root_run_sidecar"
+fi
 nvidia-smi -q > "$run/hardware.txt"
 printf '%q ' "$0" "$@" > "$run/commands.txt"
 printf '\n' >> "$run/commands.txt"
@@ -140,7 +173,7 @@ cp "$config" "$run/repro/training-config.json"
 cp "$dataset/manifest.json" "$run/repro/dataset-manifest.json"
 cp "$run/training/training-report.json" "$run/repro/processor-provenance.json"
 cp "$remote_root/train.log" "$run/training.log"
-python3 - "$run" <<'PY'
+python3 - "$run" "$trust_root_run" "$trust_root_run_sidecar" <<'PY'
 import hashlib, json, pathlib, sys
 run=pathlib.Path(sys.argv[1])
 spec={"schema_version":"1.0","model_id":"Qwen/Qwen3-VL-4B-Instruct",
@@ -165,6 +198,9 @@ spec={"schema_version":"1.0","model_id":"Qwen/Qwen3-VL-4B-Instruct",
 "robustness_test_metrics":"evaluations/robustness-test.metrics.json",
 "test_gate":"test-gate.json",
 "hardware":"hardware.txt","commands":"commands.txt"}}
+if sys.argv[2]:
+    spec["files"]["luna_trust_root"]="luna-trust-root.json"
+    spec["files"]["luna_trust_root_sidecar"]="luna-trust-root.json.sha256"
 json.dump(spec, open(run/"artifact-spec.json","w"), sort_keys=True, separators=(",", ":"))
 PY
 uv run menu-vlm bundle --run-root "$run" --spec "$run/artifact-spec.json" \

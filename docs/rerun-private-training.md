@@ -39,8 +39,10 @@ export MENU_COMPILED_PATH=$PRIVATE_ROOT/compiled
 export MENU_ARCHIVE_PATH=$PRIVATE_ROOT/compiled.tar.gz
 export TMA_DATA_ROOT=/absolute/private/tma-menu-parser-data
 export LUNA_EVALUATION_RUN=COMPLETED_CURRENT_LUNA_RUN_FOR_V9
+export LUNA_REPLAY_BASELINE=$PRIVATE_ROOT/replay/luna-test-predictions.jsonl
 export LUNA_BASELINE=$PRIVATE_ROOT/luna-test-predictions.jsonl
 export LUNA_PROVENANCE=$PRIVATE_ROOT/luna-response-provenance.json
+export LUNA_TRUST_ROOT=$PRIVATE_ROOT/luna-trust-root.json
 export RESULT_ROOT=$PRIVATE_ROOT/results
 
 mkdir -p "$PRIVATE_ROOT" "$RESULT_ROOT"
@@ -76,15 +78,37 @@ seam. Therefore the baseline must come from a completed current-Luna evaluation
 that matches the compiled v9 test image hashes and OCR exactly. Reusing a
 baseline from a different release or test split is rejected.
 
-First create the approved aggregate provenance manifest, then import the exact
-prediction JSONL and checksum sidecar:
+First materialize the replay into a staging directory. The command accepts only
+one completed matching evaluation and writes both the baseline and its SHA-256
+sidecar. Read the printed `prediction_sha256`, compare it with your private run
+notes, and paste that exact 64-character value as `LUNA_BASELINE_SHA256`. Do not
+derive or substitute the value inside the trust-root command: this explicit
+operator checkpoint is the independent approval step.
 
 ```bash
+mkdir -p "$(dirname "$LUNA_REPLAY_BASELINE")"
+uv run menu-vlm materialize-luna-baseline \
+  --dataset "$MENU_COMPILED_PATH" \
+  --tma-data-root "$TMA_DATA_ROOT" \
+  --evaluation-run "$LUNA_EVALUATION_RUN" \
+  --output "$LUNA_REPLAY_BASELINE"
+
+export LUNA_BASELINE_SHA256=PASTE_EXACT_MATERIALIZED_SHA256
+uv run menu-vlm create-luna-trust-root \
+  --dataset "$MENU_COMPILED_PATH" \
+  --tma-data-root "$TMA_DATA_ROOT" \
+  --evaluation-run "$LUNA_EVALUATION_RUN" \
+  --baseline "$LUNA_REPLAY_BASELINE" \
+  --baseline-sha256 "$LUNA_BASELINE_SHA256" \
+  --output "$LUNA_TRUST_ROOT"
+
 uv run menu-vlm approve-luna-response-provenance \
   --dataset "$MENU_COMPILED_PATH" \
   --tma-data-root "$TMA_DATA_ROOT" \
   --evaluation-run "$LUNA_EVALUATION_RUN" \
-  --canonical-baseline "$LUNA_BASELINE" \
+  --canonical-baseline "$LUNA_REPLAY_BASELINE" \
+  --trust-root "$LUNA_TRUST_ROOT" \
+  --trust-root-sidecar "$LUNA_TRUST_ROOT.sha256" \
   --output "$LUNA_PROVENANCE"
 
 uv run menu-vlm import-luna-baseline \
@@ -93,13 +117,29 @@ uv run menu-vlm import-luna-baseline \
   --evaluation-run "$LUNA_EVALUATION_RUN" \
   --response-provenance "$LUNA_PROVENANCE" \
   --response-provenance-sidecar "$LUNA_PROVENANCE.sha256" \
+  --trust-root "$LUNA_TRUST_ROOT" \
+  --trust-root-sidecar "$LUNA_TRUST_ROOT.sha256" \
   --output "$LUNA_BASELINE"
+
+cmp "$LUNA_REPLAY_BASELINE" "$LUNA_BASELINE"
+uv run menu-vlm verify-luna-trust-root \
+  --dataset "$MENU_COMPILED_PATH" \
+  --baseline "$LUNA_BASELINE" \
+  --baseline-sidecar "$LUNA_BASELINE.sha256" \
+  --response-provenance "$LUNA_PROVENANCE" \
+  --response-provenance-sidecar "$LUNA_PROVENANCE.sha256" \
+  --trust-root "$LUNA_TRUST_ROOT" \
+  --trust-root-sidecar "$LUNA_TRUST_ROOT.sha256"
+rm "$LUNA_REPLAY_BASELINE" "$LUNA_REPLAY_BASELINE.sha256"
 ```
 
 The import command produces `$LUNA_BASELINE.sha256`. Keep the baseline,
-provenance file, and both sidecars private. They are required inputs to the
-Runpod transfer and are deliberately included only in the returned private
-adapter bundle.
+provenance, trust root, and all three sidecars private. The root binds the exact
+compiled dataset manifest bytes and dataset identity, Luna evaluation run,
+replayed baseline digest, and pinned TMA runtime contract. Mutation, reuse with
+a different v9 build or run, a missing/wrong sidecar, or an occupied output path
+is a hard failure. These files are required inputs to the private Runpod path
+and are deliberately included only in the returned private adapter bundle.
 
 ## 4. Launch a bounded Runpod pod
 
@@ -146,12 +186,14 @@ scripts/runpod/transfer-to-pod.sh \
   "$POD_ID" "$PWD" "$MENU_ARCHIVE_PATH" \
   "$LUNA_BASELINE" "$LUNA_BASELINE.sha256" \
   "$LUNA_PROVENANCE" "$LUNA_PROVENANCE.sha256" \
+  "$LUNA_TRUST_ROOT" "$LUNA_TRUST_ROOT.sha256" \
   "$REMOTE_ROOT"
 
 scripts/runpod/run-training.sh \
   "$POD_ID" "$REMOTE_ROOT" "$(basename "$MENU_ARCHIVE_PATH")" \
   "$(basename "$LUNA_BASELINE")" "$(basename "$LUNA_BASELINE").sha256" \
   "$(basename "$LUNA_PROVENANCE")" "$(basename "$LUNA_PROVENANCE").sha256" \
+  "$(basename "$LUNA_TRUST_ROOT")" "$(basename "$LUNA_TRUST_ROOT").sha256" \
   "$GUARD_RECEIPT"
 ```
 
@@ -182,6 +224,8 @@ The important local files are:
 
 ```text
 $RESULT_ROOT/artifact-bundle/artifact-manifest.json
+$RESULT_ROOT/artifact-bundle/files/luna_trust_root/luna-trust-root.json
+$RESULT_ROOT/artifact-bundle/files/luna_trust_root_sidecar/luna-trust-root.json.sha256
 $RESULT_ROOT/artifact-bundle/files/adapter_config/adapter_config.json
 $RESULT_ROOT/artifact-bundle/files/adapter_weights/adapter_model.safetensors
 $RESULT_ROOT/artifact-bundle/files/selected_validation_metrics/selected.validation.metrics.json

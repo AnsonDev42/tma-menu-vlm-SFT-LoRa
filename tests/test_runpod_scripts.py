@@ -775,7 +775,7 @@ def test_run_training_forwards_required_luna_evidence_to_remote_job(tmp_path: Pa
 def test_on_pod_script_always_verifies_evaluates_and_bundles_luna_baseline() -> None:
     script = (RUNPOD / "on-pod-train.sh").read_text(encoding="utf-8")
 
-    assert script.count("verify-sidecar") == 5
+    assert script.count("verify-sidecar") == 7
     assert 'luna_run="$run/luna-test-predictions.jsonl"' in script
     assert '--luna-predictions "$luna_run"' in script
     assert '--dataset-manifest "$dataset/manifest.json"' in script
@@ -784,6 +784,26 @@ def test_on_pod_script_always_verifies_evaluates_and_bundles_luna_baseline() -> 
     assert '"luna_response_provenance":"luna-response-provenance.json"' in script
     assert '"dataset_manifest_sha256"' in script
     assert "LUNA_TEST_PREDICTIONS" not in script
+
+
+def test_private_runpod_path_carries_and_bundles_checksummed_luna_trust_root() -> None:
+    transfer = (RUNPOD / "transfer-to-pod.sh").read_text(encoding="utf-8")
+    launch = (RUNPOD / "run-training.sh").read_text(encoding="utf-8")
+    on_pod = (RUNPOD / "on-pod-train.sh").read_text(encoding="utf-8")
+    library = (RUNPOD / "lib.sh").read_text(encoding="utf-8")
+
+    assert "luna-trust-root.json" in library
+    assert "luna-trust-root.json.sha256" in library
+    assert 'verify-sidecar --file "$local_trust_root"' in transfer
+    assert '"$local_trust_root" "$local_trust_root_sidecar"' in transfer
+    assert '"$trust_root_name" "$trust_root_sidecar_name"' in launch
+    assert 'trust_root_run="$run/luna-trust-root.json"' in on_pod
+    assert "menu-vlm verify-luna-trust-root" in on_pod
+    assert 'spec["files"]["luna_trust_root"]="luna-trust-root.json"' in on_pod
+    assert (
+        'spec["files"]["luna_trust_root_sidecar"]="luna-trust-root.json.sha256"'
+        in on_pod
+    )
 
 
 @pytest.mark.parametrize(

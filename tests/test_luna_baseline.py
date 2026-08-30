@@ -12,6 +12,12 @@ from menu_vlm.jsonio import canonical_json, read_jsonl, verify_sha256_sidecar
 from menu_vlm.luna_baseline import (
     LUNA_RESPONSE_PROVENANCE_NAME,
     LUNA_RESPONSE_PROVENANCE_SIDECAR_NAME,
+    LUNA_TRUST_ROOT_NAME,
+    LUNA_TRUST_ROOT_SIDECAR_NAME,
+    approve_luna_response_provenance,
+    create_luna_trust_root,
+    materialize_luna_baseline,
+    verify_luna_trust_root,
 )
 from menu_vlm.luna_baseline import (
     import_luna_baseline as _import_luna_baseline,
@@ -221,6 +227,123 @@ def test_import_luna_baseline_matches_images_and_is_byte_deterministic(tmp_path:
     import_luna_baseline(dataset, root, run_id, output)
     assert output.read_bytes() == first
     assert output.with_suffix(".jsonl.sha256").read_bytes() == first_sidecar
+
+
+def test_private_trust_root_binds_materialized_replay_and_enables_import(
+    tmp_path: Path,
+) -> None:
+    dataset, root, run_id, _prediction, _document_id = _fixture(tmp_path)
+    baseline = tmp_path / "luna-test-predictions.jsonl"
+    materialized = materialize_luna_baseline(dataset, root, run_id, baseline)
+    trust_root = tmp_path / LUNA_TRUST_ROOT_NAME
+    trust = create_luna_trust_root(
+        dataset,
+        root,
+        run_id,
+        baseline,
+        str(materialized["prediction_sha256"]),
+        trust_root,
+    )
+    provenance = tmp_path / LUNA_RESPONSE_PROVENANCE_NAME
+    approve_luna_response_provenance(
+        dataset,
+        root,
+        run_id,
+        baseline,
+        provenance,
+        trust_root,
+        tmp_path / LUNA_TRUST_ROOT_SIDECAR_NAME,
+    )
+    imported = tmp_path / "private-import" / "luna-test-predictions.jsonl"
+    result = _import_luna_baseline(
+        dataset,
+        root,
+        run_id,
+        provenance,
+        provenance.with_suffix(".json.sha256"),
+        imported,
+        trust_root,
+        tmp_path / LUNA_TRUST_ROOT_SIDECAR_NAME,
+    )
+
+    assert trust["baseline_prediction_sha256"] == materialized["prediction_sha256"]
+    assert verify_luna_trust_root(
+        dataset,
+        baseline,
+        baseline.with_suffix(".jsonl.sha256"),
+        provenance,
+        provenance.with_suffix(".json.sha256"),
+        trust_root,
+        tmp_path / LUNA_TRUST_ROOT_SIDECAR_NAME,
+    )["valid"] is True
+    assert imported.read_bytes() == baseline.read_bytes()
+    assert result["prediction_sha256"] == materialized["prediction_sha256"]
+
+
+@pytest.mark.parametrize("damage", ["dataset", "run", "baseline", "sidecar"])
+def test_private_trust_root_rejects_identity_drift(tmp_path: Path, damage: str) -> None:
+    dataset, root, run_id, _prediction, _document_id = _fixture(tmp_path)
+    baseline = tmp_path / "luna-test-predictions.jsonl"
+    materialized = materialize_luna_baseline(dataset, root, run_id, baseline)
+    trust_root = tmp_path / LUNA_TRUST_ROOT_NAME
+    create_luna_trust_root(
+        dataset,
+        root,
+        run_id,
+        baseline,
+        str(materialized["prediction_sha256"]),
+        trust_root,
+    )
+    if damage == "dataset":
+        manifest = json.loads((dataset / "manifest.json").read_text(encoding="utf-8"))
+        manifest["dataset_sha256"] = "a" * 64
+        _write_json(dataset / "manifest.json", manifest)
+    elif damage == "run":
+        run_id = "wrong-run"
+    elif damage == "baseline":
+        value = json.loads(trust_root.read_text(encoding="utf-8"))
+        value["baseline_prediction_sha256"] = "a" * 64
+        _write_json(trust_root, value)
+        luna_baseline_module.write_sha256_sidecar(
+            trust_root, tmp_path / LUNA_TRUST_ROOT_SIDECAR_NAME
+        )
+    else:
+        (tmp_path / LUNA_TRUST_ROOT_SIDECAR_NAME).write_text(
+            f"{'a' * 64}  {LUNA_TRUST_ROOT_NAME}\n", encoding="utf-8"
+        )
+
+    with pytest.raises((ValueError, FileNotFoundError)):
+        _import_luna_baseline(
+            dataset,
+            root,
+            run_id,
+            root / LUNA_RESPONSE_PROVENANCE_NAME,
+            root / LUNA_RESPONSE_PROVENANCE_SIDECAR_NAME,
+            tmp_path / "imported.jsonl",
+            trust_root,
+            tmp_path / LUNA_TRUST_ROOT_SIDECAR_NAME,
+        )
+
+
+def test_private_trust_root_rejects_wrong_operator_digest_and_output_collision(
+    tmp_path: Path,
+) -> None:
+    dataset, root, run_id, _prediction, _document_id = _fixture(tmp_path)
+    baseline = tmp_path / "luna-test-predictions.jsonl"
+    materialize_luna_baseline(dataset, root, run_id, baseline)
+    trust_root = tmp_path / LUNA_TRUST_ROOT_NAME
+    with pytest.raises(ValueError, match="operator-supplied"):
+        create_luna_trust_root(dataset, root, run_id, baseline, "a" * 64, trust_root)
+    trust_root.write_text("occupied\n", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        create_luna_trust_root(
+            dataset,
+            root,
+            run_id,
+            baseline,
+            hashlib.sha256(baseline.read_bytes()).hexdigest(),
+            trust_root,
+        )
 
 
 def test_import_rejects_output_not_bound_to_provenance_and_cleans_up(

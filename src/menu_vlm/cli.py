@@ -8,7 +8,13 @@ from .compiler import CompileOptions, compile_release, validate_compiled_dataset
 from .constants import REPOSITORY_ROOT
 from .evaluation import evaluate_files, evaluate_test_once, select_checkpoint
 from .jsonio import canonical_json, verify_sha256_sidecar, write_json
-from .luna_baseline import approve_luna_response_provenance, import_luna_baseline
+from .luna_baseline import (
+    approve_luna_response_provenance,
+    create_luna_trust_root,
+    import_luna_baseline,
+    materialize_luna_baseline,
+    verify_luna_trust_root,
+)
 from .prediction import predict_dataset
 from .privacy import scan_public_repository
 from .release import validate_release
@@ -56,6 +62,31 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             args.response_provenance,
             args.response_provenance_sidecar,
             args.output,
+            args.trust_root,
+            args.trust_root_sidecar,
+        )
+    if args.command == "materialize-luna-baseline":
+        return materialize_luna_baseline(
+            args.dataset, args.tma_data_root, args.evaluation_run, args.output
+        )
+    if args.command == "create-luna-trust-root":
+        return create_luna_trust_root(
+            args.dataset,
+            args.tma_data_root,
+            args.evaluation_run,
+            args.baseline,
+            args.baseline_sha256,
+            args.output,
+        )
+    if args.command == "verify-luna-trust-root":
+        return verify_luna_trust_root(
+            args.dataset,
+            args.baseline,
+            args.baseline_sidecar,
+            args.response_provenance,
+            args.response_provenance_sidecar,
+            args.trust_root,
+            args.trust_root_sidecar,
         )
     if args.command == "approve-luna-response-provenance":
         return approve_luna_response_provenance(
@@ -64,6 +95,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             args.evaluation_run,
             args.canonical_baseline,
             args.output,
+            args.trust_root,
+            args.trust_root_sidecar,
         )
     if args.command == "validate-release":
         release = validate_release(args.release, allow_unsplit=args.allow_unsplit)
@@ -166,13 +199,40 @@ def _parser() -> argparse.ArgumentParser:
     luna.add_argument("--evaluation-run", required=True)
     luna.add_argument("--response-provenance", type=Path, required=True)
     luna.add_argument("--response-provenance-sidecar", type=Path, required=True)
+    luna.add_argument("--trust-root", type=Path)
+    luna.add_argument("--trust-root-sidecar", type=Path)
     luna.add_argument("--output", type=Path, required=True)
+
+    materialize = commands.add_parser("materialize-luna-baseline")
+    materialize.add_argument("--dataset", type=Path, required=True)
+    materialize.add_argument("--tma-data-root", type=Path, required=True)
+    materialize.add_argument("--evaluation-run", required=True)
+    materialize.add_argument("--output", type=Path, required=True)
+
+    trust = commands.add_parser("create-luna-trust-root")
+    trust.add_argument("--dataset", type=Path, required=True)
+    trust.add_argument("--tma-data-root", type=Path, required=True)
+    trust.add_argument("--evaluation-run", required=True)
+    trust.add_argument("--baseline", type=Path, required=True)
+    trust.add_argument("--baseline-sha256", required=True)
+    trust.add_argument("--output", type=Path, required=True)
+
+    verify_trust = commands.add_parser("verify-luna-trust-root")
+    verify_trust.add_argument("--dataset", type=Path, required=True)
+    verify_trust.add_argument("--baseline", type=Path, required=True)
+    verify_trust.add_argument("--baseline-sidecar", type=Path, required=True)
+    verify_trust.add_argument("--response-provenance", type=Path, required=True)
+    verify_trust.add_argument("--response-provenance-sidecar", type=Path, required=True)
+    verify_trust.add_argument("--trust-root", type=Path, required=True)
+    verify_trust.add_argument("--trust-root-sidecar", type=Path, required=True)
 
     approval = commands.add_parser("approve-luna-response-provenance")
     approval.add_argument("--dataset", type=Path, required=True)
     approval.add_argument("--tma-data-root", type=Path, required=True)
     approval.add_argument("--evaluation-run", required=True)
     approval.add_argument("--canonical-baseline", type=Path, required=True)
+    approval.add_argument("--trust-root", type=Path)
+    approval.add_argument("--trust-root-sidecar", type=Path)
     approval.add_argument("--output", type=Path, required=True)
 
     validate_release_parser = commands.add_parser("validate-release")

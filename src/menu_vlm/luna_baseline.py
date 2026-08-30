@@ -260,6 +260,8 @@ _APPROVED_CONTRACT_RESOURCE = "current_tma_contract_v1.json"
 _APPROVED_CONTRACT_SHA256 = "952e255374b961c90949566bc5de8fa92dff2198e7ccfc476a7c6fe1c0818cd6"
 LUNA_RESPONSE_PROVENANCE_NAME = "luna-response-provenance.json"
 LUNA_RESPONSE_PROVENANCE_SIDECAR_NAME = "luna-response-provenance.json.sha256"
+LUNA_TRUST_ROOT_NAME = "luna-trust-root.json"
+LUNA_TRUST_ROOT_SIDECAR_NAME = "luna-trust-root.json.sha256"
 CANONICAL_LUNA_BASELINE_SHA256 = (
     "320bb246b6844901daa4f32b030d621400a9b0fd9ba8b925eba8b90ea9fa1683"
 )
@@ -288,6 +290,15 @@ _PROVENANCE_DOCUMENT_KEYS = {
     "call_path",
     "provider_response_path",
     "provider_response_sha256",
+}
+_TRUST_ROOT_KEYS = {
+    "format",
+    "schema_version",
+    "dataset_sha256",
+    "dataset_manifest_sha256",
+    "evaluation_run",
+    "baseline_prediction_sha256",
+    "tma_contract_sha256",
 }
 _METRIC_KEYS = {
     "calorie_accuracy",
@@ -466,18 +477,177 @@ def approved_response_provenance_sha256(dataset_manifest: dict[str, Any]) -> str
     return APPROVED_LUNA_RESPONSE_PROVENANCE_SHA256
 
 
+def materialize_luna_baseline(
+    dataset: Path,
+    tma_data_root: Path,
+    evaluation_run: str,
+    output: Path,
+) -> dict[str, Any]:
+    """Replay one completed matching evaluation into an unapproved baseline pair."""
+    validate_compiled_dataset(dataset)
+    dataset_root = dataset.resolve()
+    if not _SAFE_ID.fullmatch(evaluation_run):
+        raise ValueError("TMA evaluation run must be a safe identifier")
+    destination, sidecar = _baseline_pair(output, must_exist=False)
+    completed, contexts, documents = _prepare_replay(
+        dataset_root, tma_data_root.resolve(), evaluation_run
+    )
+    rows = _replay_rows(tma_data_root.resolve(), completed, contexts, documents)
+    try:
+        write_jsonl(destination, rows)
+        digest = write_sha256_sidecar(destination, sidecar)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        sidecar.unlink(missing_ok=True)
+        raise
+    return {
+        "valid": True,
+        "examples": len(rows),
+        "prediction_sha256": digest,
+        "output": str(destination),
+        "sidecar": str(sidecar),
+    }
+
+
+def create_luna_trust_root(
+    dataset: Path,
+    tma_data_root: Path,
+    evaluation_run: str,
+    baseline: Path,
+    baseline_sha256: str,
+    output: Path,
+) -> dict[str, Any]:
+    """Create a private dataset-scoped trust root after independent digest entry."""
+    validate_compiled_dataset(dataset)
+    dataset_root = dataset.resolve()
+    dataset_manifest_path = dataset_root / "manifest.json"
+    dataset_manifest = read_json(dataset_manifest_path)
+    if not _SAFE_ID.fullmatch(evaluation_run):
+        raise ValueError("TMA evaluation run must be a safe identifier")
+    if not _DIGEST.fullmatch(baseline_sha256):
+        raise ValueError("The operator-supplied Luna baseline digest must be SHA-256")
+    baseline_path, baseline_sidecar = _baseline_pair(baseline, must_exist=True)
+    verified = verify_sha256_sidecar(baseline_path, baseline_sidecar)
+    if verified["sha256"] != baseline_sha256:
+        raise ValueError("The operator-supplied Luna baseline digest does not match the file")
+    completed, contexts, documents = _prepare_replay(
+        dataset_root, tma_data_root.resolve(), evaluation_run
+    )
+    reproduced = "".join(
+        canonical_json(row) + "\n"
+        for row in _replay_rows(tma_data_root.resolve(), completed, contexts, documents)
+    ).encode("utf-8")
+    if hashlib.sha256(reproduced).hexdigest() != baseline_sha256:
+        raise ValueError("Luna baseline does not match the exact completed evaluation replay")
+    if baseline_path.read_bytes() != reproduced:
+        raise ValueError("Luna baseline bytes differ from the exact completed evaluation replay")
+    destination, sidecar = _trust_root_pair(output, must_exist=False)
+    if len({baseline_path, baseline_sidecar, destination, sidecar}) != 4:
+        raise ValueError("Luna trust root output collides with baseline evidence")
+    value = {
+        "format": "tma-private-luna-trust-root-v1",
+        "schema_version": "1.0",
+        "dataset_sha256": str(dataset_manifest["dataset_sha256"]),
+        "dataset_manifest_sha256": sha256_file(dataset_manifest_path),
+        "evaluation_run": evaluation_run,
+        "baseline_prediction_sha256": baseline_sha256,
+        "tma_contract_sha256": _APPROVED_CONTRACT_SHA256,
+    }
+    try:
+        write_json(destination, value)
+        digest = write_sha256_sidecar(destination, sidecar)
+        _load_luna_trust_root(
+            destination,
+            sidecar,
+            dataset_manifest,
+            sha256_file(dataset_manifest_path),
+            evaluation_run,
+            baseline_sha256,
+        )
+    except Exception:
+        destination.unlink(missing_ok=True)
+        sidecar.unlink(missing_ok=True)
+        raise
+    return {
+        **value,
+        "trust_root_sha256": digest,
+        "output": str(destination),
+        "sidecar": str(sidecar),
+    }
+
+
+def verify_luna_trust_root(
+    dataset: Path,
+    baseline: Path,
+    baseline_sidecar: Path,
+    response_provenance: Path,
+    response_provenance_sidecar: Path,
+    trust_root: Path,
+    trust_root_sidecar: Path,
+) -> dict[str, Any]:
+    """Verify all private Luna evidence identities before a paid training run."""
+    validate_compiled_dataset(dataset)
+    dataset_root = dataset.resolve()
+    dataset_manifest_path = dataset_root / "manifest.json"
+    dataset_manifest = read_json(dataset_manifest_path)
+    baseline_path, expected_baseline_sidecar = _baseline_pair(baseline, must_exist=True)
+    if baseline_sidecar.absolute() != expected_baseline_sidecar:
+        raise ValueError("Luna baseline must use one fixed-name evidence pair")
+    baseline_check = verify_sha256_sidecar(baseline_path, expected_baseline_sidecar)
+    provenance_path, provenance_sidecar = _provenance_pair(
+        response_provenance, response_provenance_sidecar, must_exist=True
+    )
+    verify_sha256_sidecar(provenance_path, provenance_sidecar)
+    provenance_value = read_json(provenance_path)
+    evaluation_run = (
+        provenance_value.get("evaluation_run")
+        if isinstance(provenance_value, dict)
+        else None
+    )
+    if not isinstance(evaluation_run, str) or not _SAFE_ID.fullmatch(evaluation_run):
+        raise ValueError("Luna response provenance has an invalid evaluation run")
+    trust_value = _load_luna_trust_root(
+        trust_root,
+        trust_root_sidecar,
+        dataset_manifest,
+        sha256_file(dataset_manifest_path),
+        evaluation_run,
+        str(baseline_check["sha256"]),
+    )
+    _load_response_provenance(
+        provenance_path,
+        provenance_sidecar,
+        dataset_manifest,
+        evaluation_run,
+        trust_value,
+    )
+    return {
+        "valid": True,
+        "dataset_sha256": trust_value["dataset_sha256"],
+        "dataset_manifest_sha256": trust_value["dataset_manifest_sha256"],
+        "evaluation_run": evaluation_run,
+        "baseline_prediction_sha256": trust_value["baseline_prediction_sha256"],
+        "trust_root_sha256": sha256_file(trust_root),
+    }
+
+
 def approve_luna_response_provenance(
     dataset: Path,
     tma_data_root: Path,
     evaluation_run: str,
     canonical_baseline: Path,
     output: Path,
+    trust_root: Path | None = None,
+    trust_root_sidecar: Path | None = None,
 ) -> dict[str, Any]:
     """Freeze exact provider-response bytes after reproducing the canonical baseline."""
     validate_compiled_dataset(dataset)
     dataset_root = dataset.resolve()
     dataset_manifest = read_json(dataset_root / "manifest.json")
-    if dataset_manifest.get("source_release_version") == "synthetic-v1":
+    if (
+        dataset_manifest.get("source_release_version") == "synthetic-v1"
+        and trust_root is None
+    ):
         raise ValueError("Production response approval does not accept the synthetic dataset")
     baseline = canonical_baseline.absolute()
     baseline_sidecar = baseline.with_suffix(baseline.suffix + ".sha256")
@@ -486,7 +656,20 @@ def approve_luna_response_provenance(
     _require_unaliased_file(baseline, "canonical Luna baseline")
     _require_unaliased_file(baseline_sidecar, "canonical Luna baseline sidecar")
     baseline_check = verify_sha256_sidecar(baseline, baseline_sidecar)
-    if baseline_check["sha256"] != CANONICAL_LUNA_BASELINE_SHA256:
+    private_trust = _optional_luna_trust_root(
+        trust_root,
+        trust_root_sidecar,
+        dataset_manifest,
+        sha256_file(dataset_root / "manifest.json"),
+        evaluation_run,
+        str(baseline_check["sha256"]),
+    )
+    approved_baseline_sha256 = (
+        str(private_trust["baseline_prediction_sha256"])
+        if private_trust is not None
+        else CANONICAL_LUNA_BASELINE_SHA256
+    )
+    if baseline_check["sha256"] != approved_baseline_sha256:
         raise ValueError("Canonical Luna baseline does not match the independent approval digest")
     destination, sidecar = _provenance_pair(output, must_exist=False)
     reserved = {baseline.resolve(), baseline_sidecar.resolve(), destination, sidecar}
@@ -495,21 +678,21 @@ def approve_luna_response_provenance(
     completed, contexts, documents = _prepare_replay(dataset_root, tma_data_root, evaluation_run)
     rows = _replay_rows(tma_data_root.resolve(), completed, contexts, documents)
     reproduced = "".join(canonical_json(row) + "\n" for row in rows).encode("utf-8")
-    if hashlib.sha256(reproduced).hexdigest() != CANONICAL_LUNA_BASELINE_SHA256:
+    if hashlib.sha256(reproduced).hexdigest() != approved_baseline_sha256:
         raise ValueError("Approved raw responses do not reproduce the canonical Luna baseline")
     if baseline.read_bytes() != reproduced:
         raise ValueError("Canonical Luna baseline bytes differ from the approved replay")
     manifest = _response_provenance_manifest(
         evaluation_run,
         str(dataset_manifest["dataset_sha256"]),
-        CANONICAL_LUNA_BASELINE_SHA256,
+        approved_baseline_sha256,
         documents,
     )
     try:
         write_json(destination, manifest)
         digest = write_sha256_sidecar(destination, sidecar)
         _load_response_provenance(
-            destination, sidecar, dataset_manifest, evaluation_run
+            destination, sidecar, dataset_manifest, evaluation_run, private_trust
         )
         with tempfile.TemporaryDirectory() as temporary:
             validated_output = Path(temporary) / "luna-test-predictions.jsonl"
@@ -520,9 +703,11 @@ def approve_luna_response_provenance(
                 destination,
                 sidecar,
                 validated_output,
+                trust_root,
+                trust_root_sidecar,
             )
             if (
-                imported["prediction_sha256"] != CANONICAL_LUNA_BASELINE_SHA256
+                imported["prediction_sha256"] != approved_baseline_sha256
                 or validated_output.read_bytes() != baseline.read_bytes()
             ):
                 raise ValueError("Generated response provenance failed downstream validation")
@@ -581,6 +766,8 @@ def import_luna_baseline(
     response_provenance: Path,
     response_provenance_sidecar: Path,
     output: Path,
+    trust_root: Path | None = None,
+    trust_root_sidecar: Path | None = None,
 ) -> dict[str, Any]:
     """Import one completed current-TMA Luna run into the prediction contract."""
     validate_compiled_dataset(dataset)
@@ -600,8 +787,20 @@ def import_luna_baseline(
     )
     if len({destination, sidecar, provenance_path, provenance_sidecar}) != 4:
         raise ValueError("Luna output collides with reserved response provenance evidence")
+    private_trust = _optional_luna_trust_root(
+        trust_root,
+        trust_root_sidecar,
+        dataset_manifest,
+        sha256_file(dataset_root / "manifest.json"),
+        evaluation_run,
+        None,
+    )
     provenance = _load_response_provenance(
-        provenance_path, provenance_sidecar, dataset_manifest, evaluation_run
+        provenance_path,
+        provenance_sidecar,
+        dataset_manifest,
+        evaluation_run,
+        private_trust,
     )
 
     completed, contexts, actual_documents = _prepare_replay(
@@ -775,10 +974,13 @@ def _load_response_provenance(
     sidecar: Path,
     dataset_manifest: dict[str, Any],
     evaluation_run: str,
+    trust_root: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     verified = verify_sha256_sidecar(path, sidecar)
-    expected_sha256 = approved_response_provenance_sha256(dataset_manifest)
-    if verified["sha256"] != expected_sha256:
+    expected_sha256 = (
+        None if trust_root is not None else approved_response_provenance_sha256(dataset_manifest)
+    )
+    if expected_sha256 is not None and verified["sha256"] != expected_sha256:
         raise ValueError("Luna response provenance does not match the approved trust root")
     payload = path.read_bytes()
     try:
@@ -787,12 +989,25 @@ def _load_response_provenance(
         raise ValueError("Luna response provenance is not valid JSON") from exc
     if not isinstance(value, dict) or payload != (canonical_json(value) + "\n").encode("utf-8"):
         raise ValueError("Luna response provenance is not canonical exact JSON")
-    _validate_response_provenance(value, dataset_manifest, evaluation_run)
+    approved_baseline_sha256 = (
+        str(trust_root["baseline_prediction_sha256"])
+        if trust_root is not None
+        else None
+    )
+    if approved_baseline_sha256 is None:
+        _validate_response_provenance(value, dataset_manifest, evaluation_run)
+    else:
+        _validate_response_provenance(
+            value, dataset_manifest, evaluation_run, approved_baseline_sha256
+        )
     return value
 
 
 def _validate_response_provenance(
-    value: dict[str, Any], dataset_manifest: dict[str, Any], evaluation_run: str
+    value: dict[str, Any],
+    dataset_manifest: dict[str, Any],
+    evaluation_run: str,
+    approved_baseline_sha256: str | None = None,
 ) -> None:
     synthetic = dataset_manifest.get("source_release_version") == "synthetic-v1"
     expected_count = 1 if synthetic else 3
@@ -806,7 +1021,11 @@ def _validate_response_provenance(
         or not _DIGEST.fullmatch(value["baseline_prediction_sha256"])
     ):
         raise ValueError("Luna response provenance has an invalid identity schema")
-    if not synthetic and value["baseline_prediction_sha256"] != CANONICAL_LUNA_BASELINE_SHA256:
+    expected_baseline = approved_baseline_sha256 or CANONICAL_LUNA_BASELINE_SHA256
+    if (
+        (approved_baseline_sha256 is not None or not synthetic)
+        and value["baseline_prediction_sha256"] != expected_baseline
+    ):
         raise ValueError("Luna response provenance has an unapproved baseline identity")
     documents = value.get("documents")
     if not isinstance(documents, list) or len(documents) != expected_count:
@@ -853,6 +1072,121 @@ def _validate_response_provenance(
         image_ids.add(image_sha256)
     if [document["example_id"] for document in documents] != sorted(example_ids):
         raise ValueError("Luna response provenance documents are not canonically ordered")
+
+
+def validate_luna_trust_root(
+    value: Any,
+    dataset_manifest: dict[str, Any],
+    dataset_manifest_sha256: str,
+    evaluation_run: str,
+    baseline_prediction_sha256: str | None,
+) -> dict[str, Any]:
+    """Validate a trust-root value against the evidence identities at its seam."""
+    if (
+        not isinstance(value, dict)
+        or set(value) != _TRUST_ROOT_KEYS
+        or value.get("format") != "tma-private-luna-trust-root-v1"
+        or value.get("schema_version") != "1.0"
+        or value.get("dataset_sha256") != dataset_manifest.get("dataset_sha256")
+        or value.get("dataset_manifest_sha256") != dataset_manifest_sha256
+        or value.get("evaluation_run") != evaluation_run
+        or not isinstance(value.get("baseline_prediction_sha256"), str)
+        or not _DIGEST.fullmatch(value["baseline_prediction_sha256"])
+        or value.get("tma_contract_sha256") != _APPROVED_CONTRACT_SHA256
+    ):
+        raise ValueError("Luna trust root does not match the exact dataset, run, or contract")
+    if (
+        baseline_prediction_sha256 is not None
+        and value["baseline_prediction_sha256"] != baseline_prediction_sha256
+    ):
+        raise ValueError("Luna trust root does not match the exact baseline")
+    return value
+
+
+def _load_luna_trust_root(
+    path: Path,
+    sidecar: Path,
+    dataset_manifest: dict[str, Any],
+    dataset_manifest_sha256: str,
+    evaluation_run: str,
+    baseline_prediction_sha256: str | None,
+) -> dict[str, Any]:
+    root, checksum = _trust_root_pair(path, sidecar, must_exist=True)
+    verify_sha256_sidecar(root, checksum)
+    payload = root.read_bytes()
+    try:
+        value = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Luna trust root is not valid JSON") from exc
+    if payload != (canonical_json(value) + "\n").encode("utf-8"):
+        raise ValueError("Luna trust root is not canonical exact JSON")
+    return validate_luna_trust_root(
+        value,
+        dataset_manifest,
+        dataset_manifest_sha256,
+        evaluation_run,
+        baseline_prediction_sha256,
+    )
+
+
+def _optional_luna_trust_root(
+    path: Path | None,
+    sidecar: Path | None,
+    dataset_manifest: dict[str, Any],
+    dataset_manifest_sha256: str,
+    evaluation_run: str,
+    baseline_prediction_sha256: str | None,
+) -> dict[str, Any] | None:
+    if (path is None) != (sidecar is None):
+        raise ValueError("Luna trust root and sidecar must be supplied together")
+    if path is None or sidecar is None:
+        return None
+    return _load_luna_trust_root(
+        path,
+        sidecar,
+        dataset_manifest,
+        dataset_manifest_sha256,
+        evaluation_run,
+        baseline_prediction_sha256,
+    )
+
+
+def _baseline_pair(path: Path, *, must_exist: bool) -> tuple[Path, Path]:
+    baseline = path.absolute()
+    sidecar = baseline.with_name("luna-test-predictions.jsonl.sha256")
+    if baseline.name != "luna-test-predictions.jsonl" or ".." in baseline.parts:
+        raise ValueError("Luna baseline must use the reserved fixed filename")
+    if must_exist:
+        _require_unaliased_file(baseline, "Luna baseline")
+        _require_unaliased_file(sidecar, "Luna baseline sidecar")
+    elif baseline.exists() or sidecar.exists():
+        raise FileExistsError("Luna baseline or checksum sidecar already exists")
+    return baseline, sidecar
+
+
+def _trust_root_pair(
+    path: Path, sidecar: Path | None = None, *, must_exist: bool
+) -> tuple[Path, Path]:
+    root = path.absolute()
+    checksum = (
+        sidecar.absolute()
+        if sidecar is not None
+        else root.with_name(LUNA_TRUST_ROOT_SIDECAR_NAME)
+    )
+    if (
+        root.name != LUNA_TRUST_ROOT_NAME
+        or checksum.name != LUNA_TRUST_ROOT_SIDECAR_NAME
+        or ".." in root.parts
+        or ".." in checksum.parts
+        or checksum != root.with_name(LUNA_TRUST_ROOT_SIDECAR_NAME)
+    ):
+        raise ValueError("Luna trust root must use one reserved fixed-name evidence pair")
+    if must_exist:
+        _require_unaliased_file(root, "Luna trust root")
+        _require_unaliased_file(checksum, "Luna trust root sidecar")
+    elif root.exists() or checksum.exists():
+        raise FileExistsError("Luna trust root or checksum sidecar already exists")
+    return root, checksum
 
 
 def _provenance_pair(

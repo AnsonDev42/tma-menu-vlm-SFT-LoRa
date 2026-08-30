@@ -183,11 +183,18 @@ def create_synthetic_artifact_run(output: Path, *, dataset_manifest_path: Path) 
         path = root / f"{role}.synthetic.txt"
         path.write_text(f"public synthetic {role}\n", encoding="utf-8")
         files[role] = path.name
+    shutil.copyfile(dataset_manifest_path, root / files["dataset_manifest"])
+    checkpoint_sha256 = sha256_json(
+        {
+            "adapter_config.json": sha256_file(root / files["adapter_config"]),
+            "adapter_model.safetensors": sha256_file(root / files["adapter_weights"]),
+        }
+    )
     identity = {
         "dataset_sha256": dataset_manifest["dataset_sha256"],
         "model_id": MODEL_ID,
         "model_revision": MODEL_REVISION,
-        "checkpoint_sha256": "c" * 64,
+        "checkpoint_sha256": checkpoint_sha256,
     }
     write_json(
         root / files["test_gate"],
@@ -195,7 +202,7 @@ def create_synthetic_artifact_run(output: Path, *, dataset_manifest_path: Path) 
             "schema_version": "1.0",
             "identity": identity,
             "identity_sha256": sha256_json(identity),
-            "reference_sha256": "d" * 64,
+            "reference_sha256": dataset_manifest["files_sha256"]["test.jsonl"],
             "prediction_sha256": sha256_file(root / files["test_predictions"]),
             "luna_prediction_sha256": sha256_file(root / files["luna_test_predictions"]),
             "status": "completed",

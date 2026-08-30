@@ -89,7 +89,12 @@ settings, excluded stages, runtime-version inventory, and safe hashed
 importer and supplies the independent approval anchor; a self-consistent forged
 inventory, digest set, or runtime-version set therefore fails.
 The reference OCR text and order must also reproduce the compiled user prompt.
-The report execution and prediction must identify the same successful call and
+Every run metadata field must exactly equal its shared report field. The report
+execution and prediction execution must be identical successful-call objects. Their
+cost, rate, original-call timing, provider timing, and fallback count are bound to
+the corresponding exact call record, report baseline, and materialized result
+fields. The call record has exactly seven successful-call keys; even an optional
+`error: null` field is rejected. The prediction must identify the same call and
 `tma.json` result with a stopped, error-free provider response. That alias-safe
 materialized result must have the current typed result inventory, repeat the
 exact contract, contain exact typed item/result/note/location structures whose
@@ -98,15 +103,17 @@ embedded TMA result. Its processed-image SHA-256 and dimensions are recomputed
 from the bound compiled source image with the approved current-TMA processor;
 copied or fabricated processed-image evidence fails. Report, document, execution,
 prediction-execution, and call records also use their exact audited key inventories
-and reject boolean values in integer accounting fields. Only the
+and reject booleans, strings, and floats in integer result IDs and page-index
+fields. Only the
 sibling `provider.raw.json` is read, and it must be an error-free typed
-OpenAI 3.0.0 `ChatCompletion` envelope with the approved exact model, nonnegative
+OpenAI 3.0.0 `ChatCompletion` envelope parsed in strict mode with Pydantic 2.13.4,
+the approved exact model, null logprobs, nonnegative
 token accounting, approved service-tier values, exact typed URL-citation
 annotations, no moderation payload, allowed envelope/choice/message keys, and
 exactly one index-zero stopped Luna assistant text response. Refusal or
 tool/function calls fail, and
-the compact JSON must be schema-valid and reference only the compiled OCR line
-range.
+the reference OCR and compact JSON are also parsed in strict mode, and the compact
+output must reference only the compiled OCR line range.
 
 The importer writes prediction JSONL ordered by compiled example ID and an exact
 `<output>.sha256` sidecar. Both are private test evidence: keep them outside Git,

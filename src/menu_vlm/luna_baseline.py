@@ -174,7 +174,6 @@ _EXECUTION_KEYS = {
 }
 _PREDICTION_KEYS = {"prediction", "tma", "_evaluation"}
 _CALL_KEYS = {"state", "started_at", "inputs", "rate", "cost", "result_path", "elapsed_seconds"}
-_CALL_ALLOWED_KEYS = _CALL_KEYS | {"error"}
 _RESULT_KEYS = {"id", "info"}
 _ITEM_KEYS = {
     "section_id",
@@ -235,6 +234,7 @@ _APPROVED_CONTRACT_SHA256 = "952e255374b961c90949566bc5de8fa92dff2198e7ccfc476a7
 @dataclass(frozen=True)
 class _CompletedRun:
     contract: dict[str, Any]
+    rate: dict[str, Any]
     executions: dict[str, dict[str, Any]]
 
 
@@ -316,6 +316,7 @@ def import_luna_baseline(
             reference=reference,
             compiled=compiled,
             report_contract=completed.contract,
+            report_rate=completed.rate,
             report_execution=completed.executions[document_id],
             document_id=document_id,
             image_sha256=image_sha256,
@@ -395,6 +396,9 @@ def _validate_completed_run(evaluation_root: Path, evaluation_run: str) -> _Comp
     _validate_runtime_contract(run_contract)
     if baseline != run_baseline:
         raise ValueError("TMA evaluation has mismatched Luna contract provenance")
+    rate = baseline.get("rate")
+    if not isinstance(rate, dict):
+        raise ValueError("TMA evaluation has malformed rate provenance")
     documents = report.get("documents")
     if not isinstance(documents, list) or not documents:
         raise ValueError("TMA evaluation report has no completed documents")
@@ -418,6 +422,8 @@ def _validate_completed_run(evaluation_root: Path, evaluation_run: str) -> _Comp
             or execution.get("provider_finish_reason") != "stop"
         ):
             raise ValueError(f"TMA report execution is not terminal-success: {document_id}")
+        if not _is_nonnegative_number(document.get("latency_seconds")):
+            raise ValueError(f"TMA report latency is malformed: {document_id}")
         executions[document_id] = execution
     expected = len(executions)
     if (
@@ -429,7 +435,9 @@ def _validate_completed_run(evaluation_root: Path, evaluation_run: str) -> _Comp
         raise ValueError("TMA evaluation document accounting is incomplete")
     if not _is_nonnegative_int(run.get("document_count")) or run.get("document_count") != expected:
         raise ValueError("TMA evaluation run/report document accounting is mismatched")
-    return _CompletedRun(contract=contract, executions=executions)
+    if any(report.get(key) != run.get(key) for key in _RUN_KEYS):
+        raise ValueError("TMA evaluation report/run shared fields are mismatched")
+    return _CompletedRun(contract=contract, rate=rate, executions=executions)
 
 
 def _load_identity_files(
@@ -466,6 +474,7 @@ def _read_provider_compact_output(
     reference: dict[str, Any],
     compiled: dict[str, Any],
     report_contract: dict[str, Any],
+    report_rate: dict[str, Any],
     report_execution: dict[str, Any],
     document_id: str,
     image_sha256: str,
@@ -478,14 +487,7 @@ def _read_provider_compact_output(
         raise ValueError(f"TMA prediction is not a successful cached call: {document_id}")
     if set(evaluation) != _EXECUTION_KEYS or not _valid_execution_fields(evaluation):
         raise ValueError(f"TMA prediction execution is malformed: {document_id}")
-    evidence_keys = (
-        "cache_key",
-        "call_path",
-        "state",
-        "provider_error",
-        "provider_finish_reason",
-    )
-    if any(report_execution.get(key) != evaluation.get(key) for key in evidence_keys):
+    if report_execution != evaluation:
         raise ValueError(f"TMA report/prediction execution identity mismatch: {document_id}")
     if evaluation.get("provider_error") is not None:
         raise ValueError(f"TMA prediction records a provider error: {document_id}")
@@ -503,11 +505,9 @@ def _read_provider_compact_output(
     if not call_file.is_file():
         raise ValueError(f"TMA call record is missing: {document_id}")
     call = read_json(call_file)
-    if isinstance(call, dict) and call.get("error") is not None:
-        raise ValueError(f"TMA call records a provider error: {document_id}")
     if (
         not isinstance(call, dict)
-        or set(call) not in (_CALL_KEYS, _CALL_ALLOWED_KEYS)
+        or set(call) != _CALL_KEYS
         or not _valid_call_fields(call)
     ):
         raise ValueError(f"TMA call record is malformed: {document_id}")
@@ -520,6 +520,12 @@ def _read_provider_compact_output(
         raise ValueError(f"TMA call inputs are malformed: {document_id}")
     if call.get("state") != "succeeded" or call.get("result_path") != "tma.json":
         raise ValueError(f"TMA call is not a completed extraction: {document_id}")
+    if (
+        call.get("cost") != evaluation.get("cost")
+        or call.get("rate") != report_rate
+        or call.get("elapsed_seconds") != evaluation.get("original_call_seconds")
+    ):
+        raise ValueError(f"TMA call execution evidence is mismatched: {document_id}")
     if inputs.get("contract") != report_contract:
         raise ValueError(f"TMA call/report contract mismatch: {document_id}")
     if inputs.get("image_sha256") != image_sha256:
@@ -540,6 +546,11 @@ def _read_provider_compact_output(
         source_image=source_image,
         ocr_line_count=ocr_line_count,
     )
+    if (
+        result.get("fallback_item_count") != evaluation.get("fallback_item_count")
+        or result.get("provider_seconds") != evaluation.get("provider_seconds")
+    ):
+        raise ValueError(f"TMA materialized execution evidence is mismatched: {document_id}")
     if prediction.get("tma") != result:
         raise ValueError(f"TMA prediction is not bound to its materialized result: {document_id}")
     raw_relative = expected.with_name("provider.raw.json")
@@ -576,7 +587,7 @@ def _read_provider_compact_output(
         or set(choice) != _CHOICE_KEYS
         or not _is_nonnegative_int(choice.get("index"))
         or choice.get("index") != 0
-        or not (choice.get("logprobs") is None or isinstance(choice.get("logprobs"), dict))
+        or choice.get("logprobs") is not None
         or choice.get("finish_reason") != "stop"
     ):
         raise ValueError(f"TMA provider response did not finish with stop: {document_id}")
@@ -596,7 +607,7 @@ def _read_provider_compact_output(
     if any(message.get(key) is not None for key in ("refusal", "tool_calls", "function_call")):
         raise ValueError(f"TMA assistant response contains a refusal or tool call: {document_id}")
     try:
-        ChatCompletion.model_validate(raw)
+        ChatCompletion.model_validate(raw, strict=True)
     except ValidationError as exc:
         raise ValueError(
             f"TMA provider response violates the approved OpenAI schema: {document_id}"
@@ -615,7 +626,7 @@ def _validate_reference_ocr(
     raw_ocr = reference.get("ocr")
     if not isinstance(raw_ocr, dict):
         raise ValueError(f"TMA reference OCR is missing: {document_id}")
-    ocr = OCRDocument.model_validate(raw_ocr)
+    ocr = OCRDocument.model_validate(raw_ocr, strict=True)
     count = compiled.get("ocr_line_count")
     if not isinstance(count, int) or isinstance(count, bool) or count != len(ocr.spans):
         raise ValueError(f"TMA reference/compiled OCR count mismatch: {document_id}")
@@ -778,7 +789,7 @@ def _validate_tma_item(item: dict[str, Any], count: int, document_id: str) -> No
         or not isinstance(item.get("source_text"), str)
         or not isinstance(item.get("information_only"), bool)
         or not isinstance(item.get("is_ocr_fallback"), bool)
-        or item.get("page_index") != 0
+        or not _is_exact_zero_int(item.get("page_index"))
         or not _valid_confidence(item.get("confidence"))
         or not _valid_ocr_indices(item.get("ocr_line_indices"), count)
         or not _valid_notes(item.get("notes"), count)
@@ -796,7 +807,12 @@ def _validate_tma_item(item: dict[str, Any], count: int, document_id: str) -> No
 def _validate_tma_result_row(
     row: dict[str, Any], item: dict[str, Any], index: int, count: int, document_id: str
 ) -> None:
-    if set(row) != _RESULT_KEYS or row.get("id") != index or not isinstance(row.get("info"), dict):
+    if (
+        set(row) != _RESULT_KEYS
+        or not _is_nonnegative_int(row.get("id"))
+        or row.get("id") != index
+        or not isinstance(row.get("info"), dict)
+    ):
         raise ValueError(f"TMA materialized result row has an invalid inventory: {document_id}")
     info = row["info"]
     keys = set(info)
@@ -810,6 +826,8 @@ def _validate_tma_result_row(
         raise ValueError(f"TMA materialized result section binding is invalid: {document_id}")
     if (info.get("notes") if "notes" in info else []) != _serialize_tma_notes(notes):
         raise ValueError(f"TMA materialized result note binding is invalid: {document_id}")
+    if not _is_exact_zero_int(info.get("page_index")):
+        raise ValueError(f"TMA materialized result page identity is invalid: {document_id}")
     expected = {
         "text": item["name"],
         "text_translation": item["translation"] or item["name"],
@@ -866,7 +884,7 @@ def _valid_notes(value: Any, count: int) -> bool:
         if (
             not isinstance(note.get("id"), str)
             or not note["id"]
-            or note.get("page_index") != 0
+            or not _is_exact_zero_int(note.get("page_index"))
             or not isinstance(note.get("original_text"), str)
             or not note["original_text"]
             or not _valid_ocr_indices(note.get("ocr_line_indices"), count)
@@ -893,7 +911,7 @@ def _valid_note_locations(value: Any) -> bool:
             return False
         box = location.get("bounding_box")
         if (
-            location.get("page_index") != 0
+            not _is_exact_zero_int(location.get("page_index"))
             or location.get("page_label") != "Page 1"
             or not isinstance(location.get("text"), str)
             or not location["text"]
@@ -965,6 +983,10 @@ def _is_positive_int(value: Any) -> bool:
     return _is_nonnegative_int(value) and value > 0
 
 
+def _is_exact_zero_int(value: Any) -> bool:
+    return _is_nonnegative_int(value) and value == 0
+
+
 def _is_nonnegative_number(value: Any) -> bool:
     return (
         isinstance(value, (int, float))
@@ -1000,8 +1022,7 @@ def _valid_execution_fields(value: dict[str, Any]) -> bool:
 
 def _valid_call_fields(value: dict[str, Any]) -> bool:
     return (
-        value.get("error") is None
-        and isinstance(value.get("started_at"), str)
+        isinstance(value.get("started_at"), str)
         and bool(value["started_at"].strip())
         and isinstance(value.get("rate"), dict)
         and isinstance(value.get("cost"), dict)

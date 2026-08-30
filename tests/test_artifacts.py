@@ -20,11 +20,28 @@ def _artifact_run(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
         path = run / f"{role}.txt"
         path.write_text(f"synthetic {role}\n", encoding="utf-8")
         roles[role] = path.name
+    test_reference_sha256 = "c" * 64
+    dataset_sha256 = "a" * 64
+    (run / roles["dataset_manifest"]).write_text(
+        json.dumps(
+            {
+                "dataset_sha256": dataset_sha256,
+                "files_sha256": {"test.jsonl": test_reference_sha256},
+            }
+        ),
+        encoding="utf-8",
+    )
+    checkpoint_sha256 = sha256_json(
+        {
+            "adapter_config.json": sha256_file(run / roles["adapter_config"]),
+            "adapter_model.safetensors": sha256_file(run / roles["adapter_weights"]),
+        }
+    )
     identity = {
-        "dataset_sha256": "a" * 64,
+        "dataset_sha256": dataset_sha256,
         "model_id": "Qwen/Qwen3-VL-4B-Instruct",
         "model_revision": "ebb281ec70b05090aa6165b016eac8ec08e71b17",
-        "checkpoint_sha256": "b" * 64,
+        "checkpoint_sha256": checkpoint_sha256,
     }
     (run / roles["test_gate"]).write_text(
         json.dumps(
@@ -32,7 +49,7 @@ def _artifact_run(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
                 "schema_version": "1.0",
                 "identity": identity,
                 "identity_sha256": sha256_json(identity),
-                "reference_sha256": "c" * 64,
+                "reference_sha256": test_reference_sha256,
                 "prediction_sha256": sha256_file(run / roles["test_predictions"]),
                 "luna_prediction_sha256": sha256_file(run / roles["luna_test_predictions"]),
                 "status": "completed",
@@ -97,13 +114,41 @@ def test_artifact_bundle_rejects_missing_contract_role(tmp_path: Path) -> None:
         create_artifact_bundle(run, spec, tmp_path / "bundle")
 
 
-def test_artifact_bundle_rejects_luna_mutated_after_completed_gate(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "role",
+    [
+        "test_predictions",
+        "test_metrics",
+        "luna_test_predictions",
+        "adapter_config",
+        "adapter_weights",
+    ],
+)
+def test_artifact_bundle_rejects_evidence_mutated_after_completed_gate(
+    tmp_path: Path, role: str
+) -> None:
     run, spec, roles = _artifact_run(tmp_path)
-    (run / roles["luna_test_predictions"]).write_text(
-        '{"example_id":"b","prediction":{"s":[],"i":[]}}\n', encoding="utf-8"
-    )
+    (run / roles[role]).write_text("mutated after completed gate\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="Luna predictions do not match"):
+    with pytest.raises(ValueError, match="completed test gate"):
+        create_artifact_bundle(run, spec, tmp_path / "bundle")
+    assert not (tmp_path / "bundle").exists()
+
+
+@pytest.mark.parametrize("field", ["dataset_sha256", "test.jsonl"])
+def test_artifact_bundle_rejects_dataset_manifest_mutated_after_completed_gate(
+    tmp_path: Path, field: str
+) -> None:
+    run, spec, roles = _artifact_run(tmp_path)
+    manifest_path = run / roles["dataset_manifest"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if field == "dataset_sha256":
+        manifest[field] = "f" * 64
+    else:
+        manifest["files_sha256"][field] = "f" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="dataset manifest"):
         create_artifact_bundle(run, spec, tmp_path / "bundle")
     assert not (tmp_path / "bundle").exists()
 

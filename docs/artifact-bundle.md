@@ -21,9 +21,15 @@ The artifact spec also requires model ID/revision, dataset SHA-256, seed, hardwa
 and commands. `menu-vlm bundle` copies only explicit files, hashes each role, and
 writes `artifact-manifest.json`. Before publishing that manifest, bundling requires
 an exact completed test-gate schema, verifies its typed identity and digest fields,
-and requires the gate's Luna prediction SHA-256 to equal the hash of the copied
-`luna_test_predictions` role. Mutating or replacing the baseline after test-gate
-consumption therefore fails bundle creation and removes the partial output.
+and binds all frozen evidence to the copied bundle bytes. The gate's prediction,
+metrics, and Luna prediction SHA-256 values must equal the copied
+`test_predictions`, `test_metrics`, and `luna_test_predictions` roles. The gate's
+checkpoint identity is recomputed from the copied `adapter_config` and
+`adapter_weights` with the evaluation-time directory identity algorithm. The copied
+dataset manifest's dataset SHA-256 must equal both the artifact spec and gate, and
+its `files_sha256["test.jsonl"]` must equal the gate's reference SHA-256. Mutating or
+replacing any of these roles after test-gate consumption therefore fails bundle
+creation and removes the partial output.
 `menu-vlm package` creates a deterministic tarball,
 an internal file manifest, and an external SHA-256 sidecar. `verify-archive`
 rejects checksum drift, path traversal, links, unsupported entries, and missing or

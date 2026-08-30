@@ -16,7 +16,7 @@ dependencies = [
   "opencv-python-headless==5.0.0.93",
   "pillow==12.3.0",
   "pillow-heif==1.5.0",
-  "pydantic==2.12.5",
+  "pydantic==2.13.4",
 ]
 
 [project.optional-dependencies]

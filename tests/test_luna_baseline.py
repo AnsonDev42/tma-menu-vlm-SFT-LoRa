@@ -1,4 +1,5 @@
 import hashlib
+import importlib.metadata
 import json
 import shutil
 from pathlib import Path
@@ -31,6 +32,16 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, str, Path, str]:
     return dataset, root, run_id, prediction_path, document_id
 
 
+def _cache_paths(root: Path, prediction_path: Path) -> tuple[dict[str, object], Path, Path]:
+    prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+    evaluation = prediction["_evaluation"]
+    assert isinstance(evaluation, dict)
+    key = evaluation["cache_key"]
+    assert isinstance(key, str)
+    cache = root / "baselines" / "tma-core" / key
+    return prediction, cache / "call.json", cache / "tma.json"
+
+
 def test_import_luna_baseline_matches_images_and_is_byte_deterministic(tmp_path: Path) -> None:
     dataset, root, run_id, _prediction, _document_id = _fixture(tmp_path)
     output = tmp_path / "luna.jsonl"
@@ -52,6 +63,10 @@ def test_import_luna_baseline_matches_images_and_is_byte_deterministic(tmp_path:
     import_luna_baseline(dataset, root, run_id, output)
     assert output.read_bytes() == first
     assert output.with_suffix(".jsonl.sha256").read_bytes() == first_sidecar
+
+
+def test_runtime_uses_approved_pydantic_version() -> None:
+    assert importlib.metadata.version("pydantic") == "2.13.4"
 
 
 @pytest.mark.parametrize("damage", ["absolute", "traversal", "key", "filename"])
@@ -570,7 +585,7 @@ def test_import_rejects_non_null_call_error(tmp_path: Path) -> None:
     call["error"] = "SyntheticProviderError"
     _write_json(call_path, call)
 
-    with pytest.raises(ValueError, match="call records a provider error"):
+    with pytest.raises(ValueError, match="call record is malformed"):
         import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 
@@ -828,3 +843,197 @@ def test_sidecar_rejects_checksum_drift_and_wrong_file_identity(tmp_path: Path) 
     sidecar.write_text(f"{'a' * 64}  other.jsonl\n", encoding="utf-8")
     with pytest.raises(ValueError, match="file identity"):
         verify_sha256_sidecar(output, sidecar)
+
+
+@pytest.mark.parametrize(
+    ("field", "forged"),
+    [
+        ("run_id", "other-run"),
+        ("model", "current-tma-core:gpt-5.6-luna-forged"),
+        ("created_at", "2026-08-30T00:00:01Z"),
+        ("dataset_version", "forged"),
+        ("git_commit", "forged"),
+        ("document_count", 0),
+        ("reference_kind", "forged"),
+        ("metric_version", "forged"),
+        ("match_threshold", 0.6),
+        ("release", "forged"),
+        ("release_caveats", ["forged"]),
+        ("status", "incomplete"),
+        (
+            "baseline",
+            {
+                "contract": None,
+                "rate": {"forged": True},
+                "unsupported_fields": [],
+            },
+        ),
+    ],
+)
+def test_import_rejects_every_run_report_shared_field_mismatch(
+    tmp_path: Path, field: str, forged: object
+) -> None:
+    dataset, root, run_id, _prediction_path, _document_id = _fixture(tmp_path)
+    run_path = root / "evaluation" / run_id / "run.json"
+    run = json.loads(run_path.read_text(encoding="utf-8"))
+    if field == "baseline":
+        forged_baseline = json.loads(json.dumps(forged))
+        forged_baseline["contract"] = run["baseline"]["contract"]
+        run[field] = forged_baseline
+    else:
+        run[field] = forged
+    _write_json(run_path, run)
+
+    with pytest.raises(ValueError):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+@pytest.mark.parametrize(
+    ("field", "forged"),
+    [
+        ("cache_key", "b" * 64),
+        ("cached", False),
+        ("state", "failed"),
+        ("cost", {"forged": 1}),
+        ("call_path", f"baselines/tma-core/{'b' * 64}/call.json"),
+        ("provider_seconds", 0.02),
+        ("fallback_item_count", 1),
+        ("provider_error", "forged"),
+        ("provider_finish_reason", "length"),
+        ("original_call_seconds", 0.02),
+    ],
+)
+def test_import_rejects_every_report_prediction_execution_mismatch(
+    tmp_path: Path, field: str, forged: object
+) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+    prediction["_evaluation"][field] = forged
+    _write_json(prediction_path, prediction)
+
+    with pytest.raises(ValueError):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+@pytest.mark.parametrize(
+    ("field", "forged"),
+    [("cost", {"forged": 1}), ("rate", {"forged": 1}), ("elapsed_seconds", 0.02)],
+)
+def test_import_rejects_call_execution_binding_attack(
+    tmp_path: Path, field: str, forged: object
+) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    _prediction, call_path, _result_path = _cache_paths(root, prediction_path)
+    call = json.loads(call_path.read_text(encoding="utf-8"))
+    call[field] = forged
+    _write_json(call_path, call)
+
+    with pytest.raises(ValueError, match="call execution evidence is mismatched"):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+@pytest.mark.parametrize(
+    ("field", "forged"), [("provider_seconds", 0.02), ("fallback_item_count", 1)]
+)
+def test_import_rejects_materialized_execution_binding_attack(
+    tmp_path: Path, field: str, forged: object
+) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+    prediction["_evaluation"][field] = forged
+    _write_json(prediction_path, prediction)
+    report_path = root / "evaluation" / run_id / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["documents"][0]["execution"][field] = forged
+    _write_json(report_path, report)
+
+    with pytest.raises(ValueError, match="materialized execution evidence is mismatched"):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+@pytest.mark.parametrize("forged", [False, 0.0, "0"])
+def test_import_rejects_non_integer_materialized_result_id(
+    tmp_path: Path, forged: object
+) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    _prediction, _call_path, result_path = _cache_paths(root, prediction_path)
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["results"][0]["id"] = forged
+    _write_json(result_path, result)
+
+    with pytest.raises(ValueError, match="result row has an invalid inventory"):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+@pytest.mark.parametrize("owner", ["item", "info", "note", "location"])
+@pytest.mark.parametrize("forged", [False, 0.0, "0"])
+def test_import_rejects_non_integer_materialized_page_index(
+    tmp_path: Path, owner: str, forged: object
+) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    _prediction, _call_path, result_path = _cache_paths(root, prediction_path)
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    item = result["items"][0]
+    info = result["results"][0]["info"]
+    if owner in {"item", "info"}:
+        (item if owner == "item" else info)["page_index"] = forged
+    else:
+        location = {
+            "page_index": 0,
+            "page_label": "Page 1",
+            "text": "Synthetic note",
+            "bounding_box": {"x": 0.1, "y": 0.1, "w": 0.1, "h": 0.1},
+            "score": 1.0,
+            "source": "ocr_reference",
+        }
+        note = {
+            "id": "synthetic-note",
+            "page_index": 0,
+            "original_text": "Synthetic note",
+            "ocr_line_indices": [2],
+            "locations": [location],
+            "translation": None,
+            "translation_language": None,
+            "translation_status": "pending",
+        }
+        (note if owner == "note" else location)["page_index"] = forged
+        item["notes"] = [note]
+        serialized_location = {
+            key: value for key, value in location.items() if key != "bounding_box"
+        } | {"boundingBox": location["bounding_box"]}
+        info["notes"] = [note | {"locations": [serialized_location]}]
+    _write_json(result_path, result)
+
+    with pytest.raises(ValueError):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+@pytest.mark.parametrize(("field", "forged"), [("image_width", "320"), ("image_height", 240.0)])
+def test_import_rejects_strict_ocr_coercion(
+    tmp_path: Path, field: str, forged: object
+) -> None:
+    dataset, root, run_id, _prediction_path, document_id = _fixture(tmp_path)
+    reference_path = root / "evaluation" / run_id / "references" / f"{document_id}.json"
+    reference = json.loads(reference_path.read_text(encoding="utf-8"))
+    reference["ocr"][field] = forged
+    _write_json(reference_path, reference)
+
+    with pytest.raises(ValueError):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+@pytest.mark.parametrize(("field", "forged"), [("a", "2"), ("c", "1.0"), ("l", ["2"])])
+def test_import_rejects_strict_compact_output_coercion(
+    tmp_path: Path, field: str, forged: object
+) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    _prediction, call_path, _result_path = _cache_paths(root, prediction_path)
+    raw_path = call_path.with_name("provider.raw.json")
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    compact = json.loads(raw["choices"][0]["message"]["content"])
+    compact["i"][0][field] = forged
+    raw["choices"][0]["message"]["content"] = json.dumps(compact)
+    _write_json(raw_path, raw)
+
+    with pytest.raises(ValueError):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")

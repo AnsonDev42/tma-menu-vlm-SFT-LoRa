@@ -144,8 +144,35 @@ def _validate_test_gate(
         or gate.get("identity_sha256") != sha256_json(identity)
     ):
         raise ValueError("Artifact test gate identity does not match the artifact spec")
-    if gate.get("luna_prediction_sha256") != manifest_files["luna_test_predictions"]["sha256"]:
-        raise ValueError("Artifact Luna predictions do not match the completed test gate")
+    bound_roles = {
+        "prediction_sha256": "test_predictions",
+        "metrics_sha256": "test_metrics",
+        "luna_prediction_sha256": "luna_test_predictions",
+    }
+    for gate_key, role in bound_roles.items():
+        if gate.get(gate_key) != manifest_files[role]["sha256"]:
+            raise ValueError(f"Artifact {role} do not match the completed test gate")
+
+    checkpoint_hashes = {
+        "adapter_config.json": manifest_files["adapter_config"]["sha256"],
+        "adapter_model.safetensors": manifest_files["adapter_weights"]["sha256"],
+    }
+    if identity.get("checkpoint_sha256") != sha256_json(checkpoint_hashes):
+        raise ValueError("Artifact adapter does not match the completed test gate checkpoint")
+
+    dataset_manifest_path = Path(manifest_files["dataset_manifest"]["path"])
+    dataset_manifest = read_json(gate_path.parent.parent.parent / dataset_manifest_path)
+    files_sha256 = (
+        dataset_manifest.get("files_sha256") if isinstance(dataset_manifest, dict) else None
+    )
+    if (
+        not isinstance(dataset_manifest, dict)
+        or dataset_manifest.get("dataset_sha256") != spec.get("dataset_sha256")
+        or dataset_manifest.get("dataset_sha256") != identity.get("dataset_sha256")
+        or not isinstance(files_sha256, dict)
+        or files_sha256.get("test.jsonl") != gate.get("reference_sha256")
+    ):
+        raise ValueError("Artifact dataset manifest does not match the completed test gate")
 
 
 def package_directory(source: Path, archive: Path) -> dict[str, Any]:

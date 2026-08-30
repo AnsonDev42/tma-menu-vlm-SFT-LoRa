@@ -141,7 +141,7 @@ class CompactOutput(StrictModel):
 
 
 def validate_compact_output(value: Any, *, ocr_line_count: int) -> CompactOutput:
-    output = CompactOutput.model_validate(value)
+    output = CompactOutput.model_validate(value, strict=True)
     references = (
         [
             line

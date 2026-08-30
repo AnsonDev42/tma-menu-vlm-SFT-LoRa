@@ -1,3 +1,4 @@
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -107,14 +108,19 @@ def test_import_rejects_image_identity_mismatch(tmp_path: Path) -> None:
 def test_import_rejects_cache_key_that_is_not_exact_digest_of_inputs(tmp_path: Path) -> None:
     dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
     prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
-    key = prediction["_evaluation"]["cache_key"]
-    call_path = root / "baselines" / "tma-core" / key / "call.json"
-    call = json.loads(call_path.read_text(encoding="utf-8"))
-    call["inputs"]["contract"]["source_sha256"]["src/core/config.py"] = "c" * 64
-    _write_json(call_path, call)
+    old_key = prediction["_evaluation"]["cache_key"]
+    new_key = "c" * 64
+    old_cache = root / "baselines" / "tma-core" / old_key
+    new_cache = root / "baselines" / "tma-core" / new_key
+    old_cache.rename(new_cache)
+    new_call_path = f"baselines/tma-core/{new_key}/call.json"
+    prediction["_evaluation"]["cache_key"] = new_key
+    prediction["_evaluation"]["call_path"] = new_call_path
+    _write_json(prediction_path, prediction)
     report_path = root / "evaluation" / run_id / "report.json"
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    report["baseline"]["contract"] = call["inputs"]["contract"]
+    report["documents"][0]["execution"]["cache_key"] = new_key
+    report["documents"][0]["execution"]["call_path"] = new_call_path
     _write_json(report_path, report)
 
     with pytest.raises(ValueError, match="cache digest"):
@@ -186,6 +192,48 @@ def test_import_rejects_non_runtime_contract(
     _write_json(report_path, report)
 
     with pytest.raises(ValueError, match=message):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+def test_import_rejects_self_consistent_forged_source_provenance(tmp_path: Path) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+    old_key = prediction["_evaluation"]["cache_key"]
+    old_cache = root / "baselines" / "tma-core" / old_key
+    call = json.loads((old_cache / "call.json").read_text(encoding="utf-8"))
+    result = json.loads((old_cache / "tma.json").read_text(encoding="utf-8"))
+    report_path = root / "evaluation" / run_id / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+
+    forged = json.loads(json.dumps(report["baseline"]["contract"]))
+    forged["source_sha256"] = {"src/forged.py": "d" * 64}
+    forged["loaded_source_paths"] = ["src/forged.py"]
+    forged["adapter_source_sha256"] = "e" * 64
+    forged["runtime_versions"] = {
+        "openai": "forged",
+        "pydantic": "forged",
+        "Pillow": "forged",
+    }
+    call["inputs"]["contract"] = forged
+    new_key = hashlib.sha256(
+        json.dumps(call["inputs"], sort_keys=True).encode()
+    ).hexdigest()
+    new_call_path = f"baselines/tma-core/{new_key}/call.json"
+    new_cache = root / "baselines" / "tma-core" / new_key
+    old_cache.rename(new_cache)
+    _write_json(new_cache / "call.json", call)
+    result["contract"] = forged
+    _write_json(new_cache / "tma.json", result)
+    prediction["tma"] = result
+    prediction["_evaluation"]["cache_key"] = new_key
+    prediction["_evaluation"]["call_path"] = new_call_path
+    _write_json(prediction_path, prediction)
+    report["baseline"]["contract"] = forged
+    report["documents"][0]["execution"]["cache_key"] = new_key
+    report["documents"][0]["execution"]["call_path"] = new_call_path
+    _write_json(report_path, report)
+
+    with pytest.raises(ValueError, match="approved provenance anchor"):
         import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 
@@ -289,7 +337,11 @@ def test_import_rejects_materialized_result_symlink_alias(tmp_path: Path) -> Non
         ("extra-key", "key inventory"),
         ("contract", "contract mismatch"),
         ("results-type", "collections are malformed"),
+        ("results-entry", "collections are malformed"),
+        ("items-entry", "collections are malformed"),
         ("count-type", "counts are malformed"),
+        ("length-mismatch", "accounting is inconsistent"),
+        ("count-sum", "accounting is inconsistent"),
         ("provider-received", "provider evidence is contradictory"),
         ("provider-error", "provider evidence is contradictory"),
         ("finish-reason", "provider evidence is contradictory"),
@@ -311,8 +363,22 @@ def test_import_rejects_invalid_materialized_result(
         result["contract"]["adapter_source_sha256"] = "c" * 64
     elif damage == "results-type":
         result["results"] = {}
+    elif damage == "results-entry":
+        result["results"] = [None]
+        result["items"] = [{}]
+        result["vision_item_count"] = 1
+    elif damage == "items-entry":
+        result["results"] = [{}]
+        result["items"] = [1]
+        result["vision_item_count"] = 1
     elif damage == "count-type":
         result["vision_item_count"] = True
+    elif damage == "length-mismatch":
+        result["results"] = [{}]
+        result["items"] = []
+        result["vision_item_count"] = 1
+    elif damage == "count-sum":
+        result["vision_item_count"] = 1
     elif damage == "provider-received":
         result["provider_response_received"] = False
     elif damage == "provider-error":
@@ -392,17 +458,30 @@ def test_import_rejects_top_level_provider_error(tmp_path: Path) -> None:
         import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 
+def test_import_rejects_non_null_call_error(tmp_path: Path) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+    key = prediction["_evaluation"]["cache_key"]
+    call_path = root / "baselines" / "tma-core" / key / "call.json"
+    call = json.loads(call_path.read_text(encoding="utf-8"))
+    call["error"] = "SyntheticProviderError"
+    _write_json(call_path, call)
+
+    with pytest.raises(ValueError, match="call records a provider error"):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
 @pytest.mark.parametrize(
-    ("field", "value"),
+    ("field", "value", "message"),
     [
-        ("object", "other"),
-        ("id", ""),
-        ("created", True),
-        ("usage", []),
+        ("object", "other", "invalid completion envelope"),
+        ("id", "", "invalid completion envelope"),
+        ("created", True, "invalid completion envelope"),
+        ("usage", [], "malformed token usage"),
     ],
 )
 def test_import_rejects_invalid_provider_envelope(
-    tmp_path: Path, field: str, value: object
+    tmp_path: Path, field: str, value: object, message: str
 ) -> None:
     dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
     prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
@@ -410,6 +489,92 @@ def test_import_rejects_invalid_provider_envelope(
     raw_path = root / "baselines" / "tma-core" / key / "provider.raw.json"
     raw = json.loads(raw_path.read_text(encoding="utf-8"))
     raw[field] = value
+    _write_json(raw_path, raw)
+
+    with pytest.raises(ValueError, match=message):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    [
+        ("model-suffix", "model identity mismatch"),
+        ("model-type", "model identity mismatch"),
+        ("usage-negative", "malformed token usage"),
+        ("usage-string", "malformed token usage"),
+        ("usage-total", "inconsistent token usage"),
+        ("usage-extra", "malformed token usage"),
+        ("detail-string", "malformed token usage"),
+        ("choice-index", "finish with stop"),
+        ("choice-index-type", "finish with stop"),
+        ("choice-logprobs", "finish with stop"),
+        ("choice-extra", "finish with stop"),
+        ("message-extra", "assistant text content"),
+        ("message-missing", "assistant text content"),
+        ("top-extra", "invalid completion envelope"),
+        ("metadata-type", "malformed optional metadata"),
+    ],
+)
+def test_import_rejects_malformed_provider_evidence(
+    tmp_path: Path, damage: str, message: str
+) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+    key = prediction["_evaluation"]["cache_key"]
+    raw_path = root / "baselines" / "tma-core" / key / "provider.raw.json"
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    choice = raw["choices"][0]
+    message_value = choice["message"]
+    if damage == "model-suffix":
+        raw["model"] = "gpt-5.6-luna-forged"
+    elif damage == "model-type":
+        raw["model"] = 56
+    elif damage == "usage-negative":
+        raw["usage"]["prompt_tokens"] = -1
+    elif damage == "usage-string":
+        raw["usage"]["completion_tokens"] = "1"
+    elif damage == "usage-total":
+        raw["usage"]["total_tokens"] = 99
+    elif damage == "usage-extra":
+        raw["usage"]["forged_tokens"] = 1
+    elif damage == "detail-string":
+        raw["usage"]["prompt_tokens_details"] = {"cached_tokens": "1"}
+    elif damage == "choice-index":
+        choice["index"] = 1
+    elif damage == "choice-index-type":
+        choice["index"] = 0.0
+    elif damage == "choice-logprobs":
+        choice["logprobs"] = "forged"
+    elif damage == "choice-extra":
+        choice["unexpected"] = True
+    elif damage == "message-extra":
+        message_value["unexpected"] = True
+    elif damage == "message-missing":
+        message_value.pop("annotations")
+    elif damage == "top-extra":
+        raw["unexpected"] = True
+    elif damage == "metadata-type":
+        raw["service_tier"] = []
+    else:  # pragma: no cover - parametrization is exhaustive
+        raise AssertionError(damage)
+    _write_json(raw_path, raw)
+
+    with pytest.raises(ValueError, match=message):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+def test_import_rejects_combined_malformed_provider_fixture(tmp_path: Path) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+    key = prediction["_evaluation"]["cache_key"]
+    raw_path = root / "baselines" / "tma-core" / key / "provider.raw.json"
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    raw["model"] = "gpt-5.6-luna-forged"
+    raw["usage"]["prompt_tokens"] = "many"
+    raw["choices"][0]["index"] = 1
+    raw["choices"][0]["logprobs"] = "not-an-object"
+    raw["unexpected"] = {"forged": True}
+    raw["choices"][0]["message"]["unexpected"] = True
     _write_json(raw_path, raw)
 
     with pytest.raises(ValueError, match="invalid completion envelope"):

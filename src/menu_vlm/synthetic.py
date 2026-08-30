@@ -16,6 +16,7 @@ from .jsonio import (
     write_json,
     write_jsonl,
 )
+from .luna_baseline import approved_luna_runtime_contract
 
 
 def create_synthetic_release(output: Path, *, include_splits: bool = True) -> dict[str, Any]:
@@ -208,35 +209,7 @@ def create_synthetic_luna_evaluation(dataset: Path, output: Path) -> dict[str, A
     run_id = "public-synthetic-luna"
     evaluation = root / "evaluation" / run_id
     documents = []
-    contract = {
-        "adapter_version": "tma-core-extraction-v2",
-        "model": "gpt-5.6-luna",
-        "endpoint": "https://api.openai.com/v1",
-        "reasoning_effort": "none",
-        "image_detail": "low",
-        "max_completion_tokens": 4096,
-        "timeout_seconds": 75,
-        "source_sha256": {
-            "src/core/config.py": "a" * 64,
-            "src/menu_engine/v2_openai.py": "b" * 64,
-        },
-        "loaded_source_paths": ["src/core/config.py", "src/menu_engine/v2_openai.py"],
-        "adapter_source_sha256": "b" * 64,
-        "source_inventory": "all Python source files under backend/src, a deliberate safe "
-        "superset of local modules loaded by the replayed one-page path; installed packages "
-        "and native extensions are represented only by the listed runtime versions",
-        "scope": "Current local one-page TMA preprocessing, vision response materialization, "
-        "OCR fallback and result serialization using cached OCR",
-        "excluded_stages": [
-            "fresh OCR",
-            "translation",
-            "enrichment",
-            "API/auth/queue",
-            "refine pass",
-        ],
-        "provider_retries": 0,
-        "runtime_versions": {"openai": "1.0", "pydantic": "1.0", "Pillow": "1.0"},
-    }
+    contract = approved_luna_runtime_contract()
     try:
         for index, row in enumerate(read_jsonl(dataset_root / "test.jsonl"), 1):
             document_id = f"synthetic-tma-{index:04d}"
@@ -329,6 +302,8 @@ def create_synthetic_luna_evaluation(dataset: Path, output: Path) -> dict[str, A
                             "message": {
                                 "role": "assistant",
                                 "content": canonical_json(row["target"]),
+                                "annotations": [],
+                                "audio": None,
                                 "refusal": None,
                                 "tool_calls": None,
                                 "function_call": None,

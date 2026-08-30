@@ -3,8 +3,9 @@ import json
 import math
 import re
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 
 from .compiler import validate_compiled_dataset
 from .jsonio import (
@@ -80,12 +81,53 @@ _TMA_RESULT_KEYS = {
     "extraction_seconds",
     "processed_image",
 }
+_PROVIDER_REQUIRED_KEYS = {"id", "object", "created", "model", "choices", "usage"}
+_PROVIDER_ALLOWED_KEYS = _PROVIDER_REQUIRED_KEYS | {
+    "moderation",
+    "service_tier",
+    "system_fingerprint",
+}
+_CHOICE_KEYS = {"finish_reason", "index", "logprobs", "message"}
+_MESSAGE_KEYS = {
+    "annotations",
+    "audio",
+    "content",
+    "function_call",
+    "refusal",
+    "role",
+    "tool_calls",
+}
+_USAGE_REQUIRED_KEYS = {"completion_tokens", "prompt_tokens", "total_tokens"}
+_USAGE_ALLOWED_KEYS = _USAGE_REQUIRED_KEYS | {
+    "completion_tokens_details",
+    "prompt_tokens_details",
+}
+_COMPLETION_TOKEN_DETAIL_KEYS = {
+    "accepted_prediction_tokens",
+    "audio_tokens",
+    "reasoning_tokens",
+    "rejected_prediction_tokens",
+}
+_PROMPT_TOKEN_DETAIL_KEYS = {"audio_tokens", "cache_write_tokens", "cached_tokens"}
+_APPROVED_CONTRACT_RESOURCE = "current_tma_contract_v1.json"
+_APPROVED_CONTRACT_SHA256 = "952e255374b961c90949566bc5de8fa92dff2198e7ccfc476a7c6fe1c0818cd6"
 
 
 @dataclass(frozen=True)
 class _CompletedRun:
     contract: dict[str, Any]
     executions: dict[str, dict[str, Any]]
+
+
+def approved_luna_runtime_contract() -> dict[str, Any]:
+    """Load the immutable public trust anchor for the approved current-TMA run."""
+    payload = files("menu_vlm").joinpath(_APPROVED_CONTRACT_RESOURCE).read_bytes()
+    if hashlib.sha256(payload).hexdigest() != _APPROVED_CONTRACT_SHA256:
+        raise RuntimeError("Approved current-TMA contract artifact checksum mismatch")
+    value = json.loads(payload)
+    if not isinstance(value, dict):
+        raise RuntimeError("Approved current-TMA contract artifact must be a JSON object")
+    return value
 
 
 def import_luna_baseline(
@@ -324,6 +366,8 @@ def _read_provider_compact_output(
         raise ValueError(f"TMA call inputs are malformed: {document_id}")
     if call.get("state") != "succeeded" or call.get("result_path") != "tma.json":
         raise ValueError(f"TMA call is not a completed extraction: {document_id}")
+    if call.get("error") is not None:
+        raise ValueError(f"TMA call records a provider error: {document_id}")
     if inputs.get("contract") != report_contract:
         raise ValueError(f"TMA call/report contract mismatch: {document_id}")
     if inputs.get("image_sha256") != image_sha256:
@@ -349,26 +393,32 @@ def _read_provider_compact_output(
         raise ValueError(f"TMA provider response must be a JSON object: {document_id}")
     if "error" in raw:
         raise ValueError(f"TMA provider response contains a top-level error: {document_id}")
+    raw_keys = set(raw)
     if (
-        raw.get("object") != "chat.completion"
+        not _PROVIDER_REQUIRED_KEYS.issubset(raw_keys)
+        or not raw_keys.issubset(_PROVIDER_ALLOWED_KEYS)
+        or raw.get("object") != "chat.completion"
         or not isinstance(raw.get("id"), str)
         or not raw["id"].strip()
         or not _is_nonnegative_int(raw.get("created"))
-        or not isinstance(raw.get("usage"), dict)
     ):
         raise ValueError(f"TMA provider response has an invalid completion envelope: {document_id}")
     model = raw.get("model")
-    if not isinstance(model, str) or not (
-        model == _PROVIDER_MODEL or model.startswith(_PROVIDER_MODEL + "-")
-    ):
+    if model != _PROVIDER_MODEL:
         raise ValueError(f"TMA provider model identity mismatch: {document_id}")
+    if not _valid_optional_provider_metadata(raw):
+        raise ValueError(f"TMA provider response has malformed optional metadata: {document_id}")
+    _validate_provider_usage(raw.get("usage"), document_id)
     choices = raw.get("choices")
     if not isinstance(choices, list) or len(choices) != 1:
         raise ValueError(f"TMA provider response must have exactly one choice: {document_id}")
     choice = choices[0]
     if (
         not isinstance(choice, dict)
+        or set(choice) != _CHOICE_KEYS
         or not _is_nonnegative_int(choice.get("index"))
+        or choice.get("index") != 0
+        or not (choice.get("logprobs") is None or isinstance(choice.get("logprobs"), dict))
         or choice.get("finish_reason") != "stop"
     ):
         raise ValueError(f"TMA provider response did not finish with stop: {document_id}")
@@ -376,8 +426,11 @@ def _read_provider_compact_output(
     content = message.get("content") if isinstance(message, dict) else None
     if (
         not isinstance(message, dict)
+        or set(message) != _MESSAGE_KEYS
         or message.get("role") != "assistant"
         or not isinstance(content, str)
+        or not isinstance(message.get("annotations"), list)
+        or message.get("audio") is not None
     ):
         raise ValueError(
             f"TMA provider response must have exactly one assistant text content: {document_id}"
@@ -467,6 +520,8 @@ def _validate_runtime_contract(contract: dict[str, Any]) -> None:
         or any(not isinstance(value, str) or not value.strip() for value in versions.values())
     ):
         raise ValueError("TMA runtime contract has invalid runtime versions")
+    if contract != approved_luna_runtime_contract():
+        raise ValueError("TMA runtime contract does not match the approved provenance anchor")
 
 
 def _validate_materialized_result(
@@ -476,12 +531,22 @@ def _validate_materialized_result(
         raise ValueError(f"TMA materialized result has an invalid key inventory: {document_id}")
     if result.get("contract") != report_contract:
         raise ValueError(f"TMA materialized result contract mismatch: {document_id}")
-    if not isinstance(result.get("results"), list) or not isinstance(result.get("items"), list):
-        raise ValueError(f"TMA materialized result collections are malformed: {document_id}")
-    if not _is_nonnegative_int(result.get("vision_item_count")) or not _is_nonnegative_int(
-        result.get("fallback_item_count")
+    results = result.get("results")
+    items = result.get("items")
+    if (
+        not isinstance(results, list)
+        or not isinstance(items, list)
+        or any(not isinstance(value, dict) for value in results)
+        or any(not isinstance(value, dict) for value in items)
     ):
+        raise ValueError(f"TMA materialized result collections are malformed: {document_id}")
+    vision_count = result.get("vision_item_count")
+    fallback_count = result.get("fallback_item_count")
+    if not _is_nonnegative_int(vision_count) or not _is_nonnegative_int(fallback_count):
         raise ValueError(f"TMA materialized result counts are malformed: {document_id}")
+    total_count = cast(int, vision_count) + cast(int, fallback_count)
+    if len(results) != len(items) or len(items) != total_count:
+        raise ValueError(f"TMA materialized result accounting is inconsistent: {document_id}")
     if (
         result.get("provider_error") is not None
         or result.get("provider_response_received") is not True
@@ -538,6 +603,44 @@ def _is_nonnegative_number(value: Any) -> bool:
         and math.isfinite(value)
         and value >= 0
     )
+
+
+def _valid_optional_provider_metadata(raw: dict[str, Any]) -> bool:
+    moderation = raw.get("moderation")
+    service_tier = raw.get("service_tier")
+    fingerprint = raw.get("system_fingerprint")
+    return (
+        (moderation is None or isinstance(moderation, dict))
+        and (service_tier is None or isinstance(service_tier, str))
+        and (fingerprint is None or isinstance(fingerprint, str))
+    )
+
+
+def _validate_provider_usage(value: Any, document_id: str) -> None:
+    if not isinstance(value, dict):
+        raise ValueError(f"TMA provider response has malformed token usage: {document_id}")
+    keys = set(value)
+    if not _USAGE_REQUIRED_KEYS.issubset(keys) or not keys.issubset(_USAGE_ALLOWED_KEYS):
+        raise ValueError(f"TMA provider response has malformed token usage: {document_id}")
+    if any(not _is_nonnegative_int(value.get(key)) for key in _USAGE_REQUIRED_KEYS):
+        raise ValueError(f"TMA provider response has malformed token usage: {document_id}")
+    if value["total_tokens"] != value["prompt_tokens"] + value["completion_tokens"]:
+        raise ValueError(f"TMA provider response has inconsistent token usage: {document_id}")
+    _validate_token_details(
+        value.get("completion_tokens_details"), _COMPLETION_TOKEN_DETAIL_KEYS, document_id
+    )
+    _validate_token_details(
+        value.get("prompt_tokens_details"), _PROMPT_TOKEN_DETAIL_KEYS, document_id
+    )
+
+
+def _validate_token_details(value: Any, allowed: set[str], document_id: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict) or not set(value).issubset(allowed):
+        raise ValueError(f"TMA provider response has malformed token usage: {document_id}")
+    if any(item is not None and not _is_nonnegative_int(item) for item in value.values()):
+        raise ValueError(f"TMA provider response has malformed token usage: {document_id}")
 
 
 def _tma_digest(value: Any) -> str:

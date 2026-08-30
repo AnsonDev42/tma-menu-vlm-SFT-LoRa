@@ -95,7 +95,14 @@ Every run metadata field must exactly equal its shared report field. The report
 execution and prediction execution must be identical successful-call objects. Their
 cost, rate, original-call timing, provider timing, and fallback count are bound to
 the corresponding exact call record, report baseline, and materialized result
-fields. The call record has exactly seven successful-call keys; even an optional
+fields. Production call and execution costs use one exact eight-key schema: four
+bool-safe nonnegative token counts, a nonnegative decimal-string estimate, null
+provider-reported cost and unknown-reason fields, and exact five-key raw token
+usage with closed completion/prompt detail inventories. The four summarized token
+counts must agree with that nested usage, which must in turn equal the usage in the
+already provenance-pinned provider response. The exact empty cost object is accepted
+only for the pinned public synthetic dataset/provenance identity. The call record has
+exactly seven successful-call keys; even an optional
 `error: null` field is rejected. The prediction must identify the same call and
 `tma.json` result with a stopped, error-free provider response. That alias-safe
 materialized result must have the current typed result inventory, repeat the

@@ -62,6 +62,144 @@ def _cache_paths(root: Path, prediction_path: Path) -> tuple[dict[str, object], 
     return prediction, cache / "call.json", cache / "tma.json"
 
 
+def _promote_cost_fixture_to_production(
+    dataset: Path,
+    root: Path,
+    run_id: str,
+    prediction_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, object]:
+    """Exercise production cost validation with public one-document evidence."""
+    prediction, call_path, _result_path = _cache_paths(root, prediction_path)
+    raw_path = call_path.with_name("provider.raw.json")
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    raw_usage = {
+        "completion_tokens": 1,
+        "completion_tokens_details": {
+            "accepted_prediction_tokens": 0,
+            "audio_tokens": 0,
+            "reasoning_tokens": 0,
+            "rejected_prediction_tokens": 0,
+        },
+        "prompt_tokens": 1,
+        "prompt_tokens_details": {
+            "audio_tokens": 0,
+            "cache_write_tokens": None,
+            "cached_tokens": 0,
+        },
+        "total_tokens": 2,
+    }
+    raw["usage"] = raw_usage
+    _write_json(raw_path, raw)
+    cost: dict[str, object] = {
+        "cached_input_tokens": 0,
+        "estimated_usd": "0.000001",
+        "input_tokens": 1,
+        "output_tokens": 1,
+        "provider_reported_usd": None,
+        "raw_usage": raw_usage,
+        "reasoning_tokens": 0,
+        "unknown_reason": None,
+    }
+    prediction["_evaluation"]["cost"] = cost
+    _write_json(prediction_path, prediction)
+    call = json.loads(call_path.read_text(encoding="utf-8"))
+    call["cost"] = cost
+    _write_json(call_path, call)
+
+    evaluation = root / "evaluation" / run_id
+    report_path = evaluation / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["dataset_version"] = "public-production-cost-fixture-v1"
+    report["metrics"] = {key: 0.0 for key in luna_baseline_module._METRIC_KEYS}
+    report["counts"] = {key: 0 for key in luna_baseline_module._COUNT_KEYS}
+    report["costs"] = {
+        **{key: 0 for key in luna_baseline_module._COST_INTEGER_KEYS},
+        "all_predictions_estimated_usd": "0.000001",
+        "new_estimated_usd": "0.000001",
+        "original_api_latency_median_seconds": 0.0,
+        "provider_seconds_total": 0.0,
+    }
+    report["price_diagnostics"] = {
+        key: 0 for key in luna_baseline_module._PRICE_DIAGNOSTIC_KEYS
+    }
+    report["baseline"]["rate"] = {
+        key: (4096 if key == "max_input_tokens" else "public-test")
+        for key in luna_baseline_module._RATE_KEYS
+    }
+    call["rate"] = report["baseline"]["rate"]
+    _write_json(call_path, call)
+    document = report["documents"][0]
+    document["metrics"] = {key: 0.0 for key in luna_baseline_module._METRIC_KEYS}
+    document["counts"] = {key: 0 for key in luna_baseline_module._COUNT_KEYS}
+    document["execution"]["cost"] = cost
+    report["worst_documents"] = [
+        {
+            "document_id": document["document_id"],
+            "extra": 0,
+            "missing": 0,
+            "price_errors": 0,
+        }
+    ]
+    run = {
+        key: json.loads(json.dumps(report[key]))
+        for key in luna_baseline_module._RUN_KEYS
+    }
+    _write_json(report_path, report)
+    _write_json(evaluation / "run.json", run)
+
+    manifest_path = dataset / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_release_version"] = "public-production-cost-fixture-v1"
+    _write_json(manifest_path, manifest)
+
+    provenance_path = root / LUNA_RESPONSE_PROVENANCE_NAME
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    provenance["documents"][0]["provider_response_sha256"] = hashlib.sha256(
+        raw_path.read_bytes()
+    ).hexdigest()
+    _write_json(provenance_path, provenance)
+    luna_baseline_module.write_sha256_sidecar(
+        provenance_path, root / LUNA_RESPONSE_PROVENANCE_SIDECAR_NAME
+    )
+    approved_sha256 = hashlib.sha256(provenance_path.read_bytes()).hexdigest()
+    monkeypatch.setattr(
+        luna_baseline_module,
+        "approved_response_provenance_sha256",
+        lambda _manifest: approved_sha256,
+    )
+    original_validate = luna_baseline_module._validate_response_provenance
+
+    def validate_public_single_document(
+        value: dict[str, object], dataset_manifest: dict[str, object], evaluation: str
+    ) -> None:
+        synthetic_manifest = dict(dataset_manifest)
+        synthetic_manifest["source_release_version"] = "synthetic-v1"
+        original_validate(value, synthetic_manifest, evaluation)
+
+    monkeypatch.setattr(
+        luna_baseline_module,
+        "_validate_response_provenance",
+        validate_public_single_document,
+    )
+    return cost
+
+
+def _write_mirrored_cost(
+    root: Path, run_id: str, prediction_path: Path, cost: dict[str, object]
+) -> None:
+    prediction, call_path, _result_path = _cache_paths(root, prediction_path)
+    prediction["_evaluation"]["cost"] = cost
+    _write_json(prediction_path, prediction)
+    call = json.loads(call_path.read_text(encoding="utf-8"))
+    call["cost"] = cost
+    _write_json(call_path, call)
+    report_path = root / "evaluation" / run_id / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["documents"][0]["execution"]["cost"] = cost
+    _write_json(report_path, report)
+
+
 def test_import_luna_baseline_matches_images_and_is_byte_deterministic(tmp_path: Path) -> None:
     dataset, root, run_id, _prediction, _document_id = _fixture(tmp_path)
     output = tmp_path / "luna.jsonl"
@@ -101,6 +239,110 @@ def test_import_rejects_output_not_bound_to_provenance_and_cleans_up(
         import_luna_baseline(dataset, root, run_id, output)
     assert not output.exists()
     assert not output.with_suffix(".jsonl.sha256").exists()
+
+
+def test_full_import_accepts_exact_public_production_cost_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    _promote_cost_fixture_to_production(
+        dataset, root, run_id, prediction_path, monkeypatch
+    )
+
+    result = import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+    assert result["valid"] is True
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "forged-object",
+        "bool-token",
+        "string-token",
+        "float-token",
+        "extra-key",
+        "missing-key",
+        "estimated-numeric",
+        "estimated-invalid-string",
+        "raw-bool",
+        "raw-string",
+        "raw-float",
+        "raw-extra",
+        "raw-missing",
+        "detail-extra",
+        "detail-missing",
+    ],
+)
+def test_full_import_rejects_mirrored_production_cost_schema_attacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    approved = _promote_cost_fixture_to_production(
+        dataset, root, run_id, prediction_path, monkeypatch
+    )
+    cost = json.loads(json.dumps(approved))
+    if damage == "forged-object":
+        cost = {"forged": True}
+    elif damage == "bool-token":
+        cost["cached_input_tokens"] = True
+    elif damage == "string-token":
+        cost["input_tokens"] = "1"
+    elif damage == "float-token":
+        cost["output_tokens"] = 1.0
+    elif damage == "extra-key":
+        cost["forged"] = True
+    elif damage == "missing-key":
+        del cost["unknown_reason"]
+    elif damage == "estimated-numeric":
+        cost["estimated_usd"] = 0.000001
+    elif damage == "estimated-invalid-string":
+        cost["estimated_usd"] = "NaN"
+    else:
+        usage = cost["raw_usage"]
+        assert isinstance(usage, dict)
+        if damage == "raw-bool":
+            usage["prompt_tokens"] = True
+        elif damage == "raw-string":
+            usage["completion_tokens"] = "1"
+        elif damage == "raw-float":
+            usage["total_tokens"] = 2.0
+        elif damage == "raw-extra":
+            usage["forged"] = True
+        elif damage == "raw-missing":
+            del usage["total_tokens"]
+        else:
+            details = usage["prompt_tokens_details"]
+            assert isinstance(details, dict)
+            if damage == "detail-extra":
+                details["forged"] = 0
+            elif damage == "detail-missing":
+                del details["cache_write_tokens"]
+            else:  # pragma: no cover - parametrization is exhaustive
+                raise AssertionError(damage)
+    _write_mirrored_cost(root, run_id, prediction_path, cost)
+
+    with pytest.raises(ValueError, match=r"execution is malformed|call record is malformed"):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+def test_full_import_rejects_schema_valid_mirrored_cost_usage_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    approved = _promote_cost_fixture_to_production(
+        dataset, root, run_id, prediction_path, monkeypatch
+    )
+    cost = json.loads(json.dumps(approved))
+    usage = cost["raw_usage"]
+    assert isinstance(usage, dict)
+    cost["input_tokens"] += 1
+    usage["prompt_tokens"] += 1
+    usage["total_tokens"] += 1
+    _write_mirrored_cost(root, run_id, prediction_path, cost)
+
+    with pytest.raises(ValueError, match="cost usage does not match provider response"):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 
 def test_import_rejects_provenance_parent_directory_symlink_alias(tmp_path: Path) -> None:
@@ -1094,7 +1336,12 @@ def test_import_rejects_call_execution_binding_attack(
     call[field] = forged
     _write_json(call_path, call)
 
-    with pytest.raises(ValueError, match="call execution evidence is mismatched"):
+    message = (
+        r"call record is malformed|call execution evidence is mismatched"
+        if field == "cost"
+        else "call execution evidence is mismatched"
+    )
+    with pytest.raises(ValueError, match=message):
         import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 

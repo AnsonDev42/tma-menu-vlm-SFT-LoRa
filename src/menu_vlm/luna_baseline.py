@@ -4,6 +4,7 @@ import math
 import re
 import tempfile
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
@@ -32,6 +33,7 @@ _CURRENT_LUNA_MODEL = "current-tma-core:gpt-5.6-luna"
 _PROVIDER_MODEL = "gpt-5.6-luna"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_NONNEGATIVE_DECIMAL = re.compile(r"^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$")
 _SAFE_SOURCE_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
 _CONTRACT_KEYS = {
     "adapter_version",
@@ -118,6 +120,29 @@ _COMPLETION_TOKEN_DETAIL_KEYS = {
     "rejected_prediction_tokens",
 }
 _PROMPT_TOKEN_DETAIL_KEYS = {"audio_tokens", "cache_write_tokens", "cached_tokens"}
+_EXECUTION_COST_KEYS = {
+    "cached_input_tokens",
+    "estimated_usd",
+    "input_tokens",
+    "output_tokens",
+    "provider_reported_usd",
+    "raw_usage",
+    "reasoning_tokens",
+    "unknown_reason",
+}
+_EXECUTION_COST_INTEGER_KEYS = {
+    "cached_input_tokens",
+    "input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+}
+_EXACT_RAW_USAGE_KEYS = {
+    "completion_tokens",
+    "completion_tokens_details",
+    "prompt_tokens",
+    "prompt_tokens_details",
+    "total_tokens",
+}
 _SERVICE_TIERS = {"auto", "default", "flex", "scale", "priority", "fast"}
 _REPORT_KEYS = {
     "run_id",
@@ -408,6 +433,7 @@ class _CompletedRun:
     contract: dict[str, Any]
     rate: dict[str, Any]
     executions: dict[str, dict[str, Any]]
+    synthetic: bool
 
 
 @dataclass(frozen=True)
@@ -712,6 +738,7 @@ def _replay_rows(
             report_contract=completed.contract,
             report_rate=completed.rate,
             report_execution=completed.executions[context.document_id],
+            synthetic=completed.synthetic,
             document_id=context.document_id,
             image_sha256=context.image_sha256,
             source_image=context.source_image,
@@ -988,7 +1015,9 @@ def _validate_completed_run(
         execution = document.get("execution")
         if not isinstance(execution, dict):
             raise ValueError(f"TMA report execution is missing: {document_id}")
-        if set(execution) != _EXECUTION_KEYS or not _valid_execution_fields(execution):
+        if set(execution) != _EXECUTION_KEYS or not _valid_execution_fields(
+            execution, synthetic=synthetic
+        ):
             raise ValueError(f"TMA report execution is malformed: {document_id}")
         if (
             execution.get("state") != "succeeded"
@@ -1016,7 +1045,10 @@ def _validate_completed_run(
     ):
         raise ValueError("TMA evaluation report worst-document evidence is malformed")
     return _CompletedRun(
-        contract=contract, rate=cast(dict[str, Any], rate), executions=executions
+        contract=contract,
+        rate=cast(dict[str, Any], rate),
+        executions=executions,
+        synthetic=synthetic,
     )
 
 
@@ -1060,13 +1092,16 @@ def _read_provider_compact_output(
     image_sha256: str,
     source_image: Path,
     expected_raw_sha256: str,
+    synthetic: bool,
 ) -> tuple[dict[str, Any], str]:
     if set(prediction) != _PREDICTION_KEYS:
         raise ValueError(f"TMA prediction has an unexpected key inventory: {document_id}")
     evaluation = prediction.get("_evaluation")
     if not isinstance(evaluation, dict) or evaluation.get("state") != "succeeded":
         raise ValueError(f"TMA prediction is not a successful cached call: {document_id}")
-    if set(evaluation) != _EXECUTION_KEYS or not _valid_execution_fields(evaluation):
+    if set(evaluation) != _EXECUTION_KEYS or not _valid_execution_fields(
+        evaluation, synthetic=synthetic
+    ):
         raise ValueError(f"TMA prediction execution is malformed: {document_id}")
     if report_execution != evaluation:
         raise ValueError(f"TMA report/prediction execution identity mismatch: {document_id}")
@@ -1089,7 +1124,7 @@ def _read_provider_compact_output(
     if (
         not isinstance(call, dict)
         or set(call) != _CALL_KEYS
-        or not _valid_call_fields(call)
+        or not _valid_call_fields(call, synthetic=synthetic)
     ):
         raise ValueError(f"TMA call record is malformed: {document_id}")
     inputs = call.get("inputs") if isinstance(call, dict) else None
@@ -1161,6 +1196,8 @@ def _read_provider_compact_output(
     if not _valid_optional_provider_metadata(raw):
         raise ValueError(f"TMA provider response has malformed optional metadata: {document_id}")
     _validate_provider_usage(raw.get("usage"), document_id)
+    if not synthetic and evaluation["cost"]["raw_usage"] != raw["usage"]:
+        raise ValueError(f"TMA cost usage does not match provider response: {document_id}")
     choices = raw.get("choices")
     if not isinstance(choices, list) or len(choices) != 1:
         raise ValueError(f"TMA provider response must have exactly one choice: {document_id}")
@@ -1751,23 +1788,84 @@ def _valid_optional_provider_metadata(raw: dict[str, Any]) -> bool:
     )
 
 
-def _valid_execution_fields(value: dict[str, Any]) -> bool:
+def _valid_execution_fields(value: dict[str, Any], *, synthetic: bool) -> bool:
     return (
         isinstance(value.get("cached"), bool)
-        and isinstance(value.get("cost"), dict)
+        and _valid_execution_cost(value.get("cost"), synthetic=synthetic)
         and _is_nonnegative_number(value.get("provider_seconds"))
         and _is_nonnegative_int(value.get("fallback_item_count"))
         and _is_nonnegative_number(value.get("original_call_seconds"))
     )
 
 
-def _valid_call_fields(value: dict[str, Any]) -> bool:
+def _valid_call_fields(value: dict[str, Any], *, synthetic: bool) -> bool:
     return (
         isinstance(value.get("started_at"), str)
         and bool(value["started_at"].strip())
         and isinstance(value.get("rate"), dict)
-        and isinstance(value.get("cost"), dict)
+        and _valid_execution_cost(value.get("cost"), synthetic=synthetic)
         and _is_nonnegative_number(value.get("elapsed_seconds"))
+    )
+
+
+def _valid_execution_cost(value: Any, *, synthetic: bool) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if synthetic:
+        return value == {}
+    if (
+        set(value) != _EXECUTION_COST_KEYS
+        or any(
+            not _is_nonnegative_int(value.get(key))
+            for key in _EXECUTION_COST_INTEGER_KEYS
+        )
+        or value.get("provider_reported_usd") is not None
+        or value.get("unknown_reason") is not None
+    ):
+        return False
+    estimated = value.get("estimated_usd")
+    if not isinstance(estimated, str) or not _NONNEGATIVE_DECIMAL.fullmatch(estimated):
+        return False
+    try:
+        decimal = Decimal(estimated)
+    except InvalidOperation:
+        return False
+    if not decimal.is_finite() or decimal < 0:
+        return False
+    usage = value.get("raw_usage")
+    if not _valid_exact_cost_usage(usage):
+        return False
+    assert isinstance(usage, dict)
+    completion_details = usage["completion_tokens_details"]
+    prompt_details = usage["prompt_tokens_details"]
+    assert isinstance(completion_details, dict)
+    assert isinstance(prompt_details, dict)
+    return bool(
+        value["input_tokens"] == usage["prompt_tokens"]
+        and value["output_tokens"] == usage["completion_tokens"]
+        and value["cached_input_tokens"] == prompt_details["cached_tokens"]
+        and value["reasoning_tokens"] == completion_details["reasoning_tokens"]
+    )
+
+
+def _valid_exact_cost_usage(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != _EXACT_RAW_USAGE_KEYS:
+        return False
+    if any(not _is_nonnegative_int(value.get(key)) for key in _USAGE_REQUIRED_KEYS):
+        return False
+    if value["total_tokens"] != value["prompt_tokens"] + value["completion_tokens"]:
+        return False
+    completion_details = value.get("completion_tokens_details")
+    prompt_details = value.get("prompt_tokens_details")
+    return (
+        isinstance(completion_details, dict)
+        and set(completion_details) == _COMPLETION_TOKEN_DETAIL_KEYS
+        and all(_is_nonnegative_int(item) for item in completion_details.values())
+        and isinstance(prompt_details, dict)
+        and set(prompt_details) == _PROMPT_TOKEN_DETAIL_KEYS
+        and _is_nonnegative_int(prompt_details.get("audio_tokens"))
+        and prompt_details.get("cache_write_tokens") is None
+        and _is_nonnegative_int(prompt_details.get("cached_tokens"))
     )
 
 

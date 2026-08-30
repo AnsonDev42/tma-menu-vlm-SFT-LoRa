@@ -211,7 +211,9 @@ built-in rsync, omit `--info=progress2` and add `--no-owner --no-group` (Runpod
 workspace volumes reject ownership preservation). Transfer the public checkout
 without `.git`, `.venv`, `.env`, caches, or private data; transfer the archive
 and Luna/trust-root evidence files only to the private remote directory; then
-run `sha256sum -c` against every transferred sidecar before starting work.
+run `sha256sum -c` against every transferred sidecar before starting work. The
+on-pod verifier rejects symlinks, so the evidence files in its `incoming/`
+directory must be ordinary copied files, not aliases to another remote path.
 
 Monitor until the remote log contains `TRAIN_EVAL_BUNDLE_DONE`:
 

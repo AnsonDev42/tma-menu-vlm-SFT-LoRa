@@ -55,6 +55,8 @@ throughput, and peak memory. Note order is irrelevant; missing notes, wrong text
 or attaching a note to the wrong matched owner reduces structural F1. Robustness
 uses the same metrics on its separate split. Pass saved
 Luna predictions with `--luna-predictions` for an identical baseline report.
+For the primary frozen test this argument is mandatory; the Runpod workflow never
+falls back to a test report without the saved baseline.
 
 ## Consume frozen test once
 
@@ -65,17 +67,26 @@ uv run menu-vlm evaluate-test \
   --references /workspace/private-dataset/test.jsonl \
   --predictions /workspace/run/test.predictions.jsonl \
   --dataset-sha256 DATASET_SHA256 \
+  --dataset-manifest /workspace/private-dataset/manifest.json \
   --checkpoint /workspace/run/selected-adapter \
   --gate-store /workspace/tma-menu-vlm/frozen-test-gates \
+  --luna-predictions /workspace/run/luna-test-predictions.jsonl \
   --output /workspace/run/test.metrics.json
 ```
 
 The fixed gate store is outside the training/evaluation output tree and writes one
-gate keyed by dataset SHA-256, pinned model ID and
+gate keyed by dataset SHA-256, the exact compiled manifest file SHA-256, pinned model ID and
 revision, and the hashes of the selected adapter config/weights. Replaying the
 same identity with a different metrics output path or predictions file still
-fails. A different adapter content hash creates a different identity. Use
-validation—not frozen test—for iteration.
+fails. The gate also records the required Luna prediction SHA-256, while keeping
+the one-shot identity bound to the candidate adapter rather than offering a new
+test attempt when a baseline file changes. A different adapter content hash
+creates a different identity. Use validation—not frozen test—for iteration.
+The returned artifact also carries the fixed-name approved Luna response
+provenance manifest. Bundle creation verifies its aggregate anchor and the exact
+compiled dataset manifest schema/accounting before binding either to the frozen
+gate. The provenance baseline digest must also equal the returned Luna prediction
+bytes, so importer and bundle success both prove the same baseline identity.
 
 Mac inference is optional. The authoritative run is on the Runpod environment;
 the 16 GB Mac path is limited to build/validation/preflight unless a compatible

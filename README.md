@@ -71,6 +71,19 @@ export MENU_COMPILED_PATH=/absolute/private/qwen3-vl-sft-v1
 
 uv run menu-vlm validate-release --release "$MENU_DATASET_PATH"
 uv run menu-vlm compile --release "$MENU_DATASET_PATH" --output "$MENU_COMPILED_PATH"
+uv run menu-vlm approve-luna-response-provenance \
+  --dataset "$MENU_COMPILED_PATH" \
+  --tma-data-root /absolute/private/tma-menu-parser-data \
+  --evaluation-run COMPLETED_CURRENT_LUNA_RUN \
+  --canonical-baseline /absolute/private/luna-test-predictions.jsonl \
+  --output /absolute/private/luna-response-provenance.json
+uv run menu-vlm import-luna-baseline \
+  --dataset "$MENU_COMPILED_PATH" \
+  --tma-data-root /absolute/private/tma-menu-parser-data \
+  --evaluation-run COMPLETED_CURRENT_LUNA_RUN \
+  --response-provenance /absolute/private/luna-response-provenance.json \
+  --response-provenance-sidecar /absolute/private/luna-response-provenance.json.sha256 \
+  --output /absolute/private/luna-test-predictions.jsonl
 uv run menu-vlm package --source "$MENU_COMPILED_PATH" \
   --archive /absolute/private/qwen3-vl-sft-v1.tar.gz
 ```
@@ -92,9 +105,10 @@ uv run menu-vlm train --config configs/qwen3-vl-4b-lora.json \
 Executable prediction/evaluation commands are in
 [docs/training-and-evaluation.md](docs/training-and-evaluation.md). Selection is
 validation-only: structural F1 (including printed note text and ownership), item
-F1, then loss. `evaluate-test` uses a fixed gate store keyed to dataset, pinned
-model revision, and adapter content; changing an output filename cannot consume
-the same frozen test twice.
+F1, then loss. `evaluate-test` requires the saved Luna baseline and uses a fixed
+gate store keyed to dataset, pinned model revision, and adapter content; the gate
+records the baseline hash, and changing an output filename cannot consume the
+same frozen test twice.
 
 ## Runpod and returned artifacts
 

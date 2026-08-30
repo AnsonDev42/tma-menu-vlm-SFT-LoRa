@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,28 @@ def sha256_file(path: Path) -> str:
 
 def sha256_json(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def write_sha256_sidecar(path: Path, sidecar: Path) -> str:
+    digest = sha256_file(path)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(f"{digest}  {path.name}\n", encoding="utf-8")
+    return digest
+
+
+def verify_sha256_sidecar(path: Path, sidecar: Path) -> dict[str, Any]:
+    source = path.resolve()
+    checksum = sidecar.resolve()
+    if not source.is_file() or not checksum.is_file():
+        raise ValueError("File and SHA-256 sidecar must both exist")
+    expected_line = checksum.read_text(encoding="utf-8")
+    match = re.fullmatch(r"([0-9a-f]{64})  ([^/\\\r\n]+)\n", expected_line)
+    if match is None or match.group(2) != source.name:
+        raise ValueError("SHA-256 sidecar format or file identity is invalid")
+    actual = sha256_file(source)
+    if actual != match.group(1):
+        raise ValueError("File checksum does not match SHA-256 sidecar")
+    return {"valid": True, "sha256": actual, "file": source.name}
 
 
 def safe_relative(root: Path, relative: str) -> Path:

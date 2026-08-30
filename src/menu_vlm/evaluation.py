@@ -8,7 +8,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from .constants import MODEL_ID, MODEL_REVISION
-from .jsonio import canonical_json, read_jsonl, sha256_file, sha256_json, write_json
+from .jsonio import canonical_json, read_json, read_jsonl, sha256_file, sha256_json, write_json
 from .schemas import CompactItem, CompactOutput, CompactSection, validate_compact_output
 
 
@@ -139,17 +139,23 @@ def evaluate_test_once(
     output: Path,
     *,
     dataset_sha256: str,
+    dataset_manifest: Path,
     checkpoint: Path,
     gate_store: Path,
-    luna_predictions: Path | None = None,
+    luna_predictions: Path,
 ) -> dict[str, Any]:
     if len(dataset_sha256) != 64 or any(
         character not in "0123456789abcdef" for character in dataset_sha256
     ):
         raise ValueError("dataset_sha256 must be a lowercase SHA-256 digest")
+    manifest = read_json(dataset_manifest)
+    if not isinstance(manifest, dict) or manifest.get("dataset_sha256") != dataset_sha256:
+        raise ValueError("Frozen test dataset manifest does not match dataset_sha256")
+    dataset_manifest_sha256 = sha256_file(dataset_manifest)
     checkpoint_sha256 = _directory_sha256(checkpoint)
     identity = {
         "dataset_sha256": dataset_sha256,
+        "dataset_manifest_sha256": dataset_manifest_sha256,
         "model_id": MODEL_ID,
         "model_revision": MODEL_REVISION,
         "checkpoint_sha256": checkpoint_sha256,
@@ -167,9 +173,7 @@ def evaluate_test_once(
         "identity_sha256": identity_sha256,
         "reference_sha256": sha256_file(references),
         "prediction_sha256": sha256_file(predictions),
-        "luna_prediction_sha256": (
-            sha256_file(luna_predictions) if luna_predictions is not None else None
-        ),
+        "luna_prediction_sha256": sha256_file(luna_predictions),
         "status": "reserved",
     }
     try:
@@ -186,6 +190,7 @@ def evaluate_test_once(
     metrics["frozen_test_gate"] = {
         "identity_sha256": identity_sha256,
         "checkpoint_sha256": checkpoint_sha256,
+        "dataset_manifest_sha256": dataset_manifest_sha256,
         "path": str(gate),
     }
     return metrics

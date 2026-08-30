@@ -69,3 +69,80 @@ one terminal LF: 4,284 UTF-8 bytes with SHA-256
 `manifest.json` records the source release hash, split assignments, prompt hash,
 counts, every generated file SHA-256, and an aggregate dataset SHA-256. Repeated
 compiles are byte-identical.
+
+## Imported current-Luna test baseline
+
+`menu-vlm import-luna-baseline` takes the compiled dataset, an explicit TMA data
+root, a completed evaluation run ID, and the approved fixed-name private
+`luna-response-provenance.json` plus its checksum sidecar. It requires the
+run/report model to be
+`current-tma-core:gpt-5.6-luna`, exact completed document/reference/prediction
+accounting, and a one-to-one image SHA-256 match with compiled `test.jsonl`.
+
+For every matched page, `_evaluation.call_path` must be exactly
+`baselines/tma-core/<cache-sha256>/call.json`; absolute paths, traversal, symlink
+escapes, cache-key mismatches, or another subtree fail. The call's input image
+hash and exact TMA OCR digest must match the reference, its contract must match
+the report baseline contract, and its cache key is recomputed from those inputs.
+The contract itself is pinned to the current TMA extraction adapter, provider
+settings, excluded stages, runtime-version inventory, and safe hashed
+`src/**/*.py` source inventory. The checked-in
+`src/menu_vlm/current_tma_contract_v1.json` artifact is checksum-pinned by the
+importer and supplies the independent approval anchor; a self-consistent forged
+inventory, digest set, or runtime-version set therefore fails.
+The reference OCR text and order must also reproduce the compiled user prompt.
+Every run metadata field must exactly equal its shared report field. The report
+execution and prediction execution must be identical successful-call objects. Their
+cost, rate, original-call timing, provider timing, and fallback count are bound to
+the corresponding exact call record, report baseline, and materialized result
+fields. Production call and execution costs use one exact eight-key schema: four
+bool-safe nonnegative token counts, a nonnegative decimal-string estimate, null
+provider-reported cost and unknown-reason fields, and exact five-key raw token
+usage with closed completion/prompt detail inventories. The four summarized token
+counts must agree with that nested usage, which must in turn equal the usage in the
+already provenance-pinned provider response. The exact empty cost object is accepted
+only for the pinned public synthetic dataset/provenance identity. The call record has
+exactly seven successful-call keys; even an optional
+`error: null` field is rejected. The prediction must identify the same call and
+`tma.json` result with a stopped, error-free provider response. That alias-safe
+materialized result must have the current typed result inventory, repeat the
+exact contract, contain exact typed item/result/note/location structures whose
+lengths agree with the vision and fallback counts, and equal the prediction's
+embedded TMA result. Its processed-image SHA-256 and dimensions are recomputed
+from the bound compiled source image with the approved current-TMA processor;
+copied or fabricated processed-image evidence fails. Report, document, execution,
+prediction-execution, and call records also use their exact audited key inventories
+and reject booleans, strings, and floats in integer result IDs and page-index
+fields. Before any provider response is parsed, the importer verifies the exact
+raw bytes against the approved provenance manifest. That canonical manifest is
+checksum verified, must match the public production aggregate anchor, and binds
+all and only the compiled test/report documents one-to-one by image hash, cache
+key, exact call and raw-response paths, call identity, and raw-response SHA-256.
+There is no production fallback. Approval generation independently reproduces
+the predictions, requires the canonical fixed baseline digest, and runs the
+generated manifest through the same downstream importer before reporting success.
+Private paths and per-document hashes remain
+outside Git. Only the sibling `provider.raw.json` is read, and it must be an error-free typed
+OpenAI 3.0.0 `ChatCompletion` envelope parsed in strict mode with Pydantic 2.13.4,
+the approved exact model, null logprobs, nonnegative
+token accounting, approved service-tier values, exact typed URL-citation
+annotations, no moderation payload, allowed envelope/choice/message keys, and
+exactly one index-zero stopped Luna assistant text response. Refusal or
+tool/function calls fail, and
+the reference OCR and compact JSON are also parsed in strict mode, and the compact
+output must reference only the compiled OCR line range. Completed-run metadata is
+also closed: `schema_error` is null; shared commit/reference/metric/release fields,
+thresholds, caveats and timestamps are strictly typed; report summary collections,
+cost/price diagnostics, worst-document rows, matches and unmatched inventories use
+their exact audited nested schemas; and overall/per-document metrics and counts use
+bool-safe accounting.
+
+The importer writes prediction JSONL ordered by compiled example ID and an exact
+`<output>.sha256` sidecar. Before success, that final output digest must equal the
+manifest's `baseline_prediction_sha256`; a mismatch removes both output and sidecar.
+The manifest and sidecar path, including every parent component, must be canonical
+and symlink-free. Both are private test evidence: keep them outside Git,
+transfer them directly to the pod together with the private provenance manifest,
+and return both fixed-name files in the adapter bundle. The public synthetic smoke
+uses a separate pinned synthetic-only provenance aggregate accepted only for the
+explicit public synthetic dataset version.

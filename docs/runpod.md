@@ -51,9 +51,32 @@ runpodctl ssh list-keys
 
 uv run menu-vlm package --source /absolute/private/compiled \
   --archive /absolute/private/compiled.tar.gz
+
+uv run menu-vlm approve-luna-response-provenance \
+  --dataset /absolute/private/compiled \
+  --tma-data-root /absolute/private/tma-menu-parser-data \
+  --evaluation-run COMPLETED_CURRENT_LUNA_RUN \
+  --canonical-baseline /absolute/private/luna-test-predictions.jsonl \
+  --output /absolute/private/luna-response-provenance.json
+
+uv run menu-vlm import-luna-baseline \
+  --dataset /absolute/private/compiled \
+  --tma-data-root /absolute/private/tma-menu-parser-data \
+  --evaluation-run COMPLETED_CURRENT_LUNA_RUN \
+  --response-provenance /absolute/private/luna-response-provenance.json \
+  --response-provenance-sidecar /absolute/private/luna-response-provenance.json.sha256 \
+  --output /absolute/private/luna-test-predictions.jsonl
 ```
 
-The package command writes `compiled.tar.gz.sha256`. Keep both files.
+The package command writes `compiled.tar.gz.sha256`; the importer writes
+`luna-test-predictions.jsonl.sha256`. Keep those files and the approved fixed-name
+provenance manifest/sidecar private. The importer
+requires a complete `current-tma-core:gpt-5.6-luna` run, matches its evaluation
+references to compiled test images by SHA-256, resolves provider responses only
+through validated call paths under the explicit TMA data root, and rejects any
+missing, duplicate, extra, malformed, or mismatched identity. It verifies every
+raw-response digest against the checksum-verified, aggregate-pinned provenance
+manifest before parsing; production has no fallback.
 
 ## 2. Launch with a bounded local deletion guard
 
@@ -75,18 +98,28 @@ command if SSH is not ready yet.
 
 ```bash
 scripts/runpod/transfer-to-pod.sh POD_ID "$PWD" \
-  /absolute/private/compiled.tar.gz /workspace/tma-menu-vlm
+  /absolute/private/compiled.tar.gz \
+  /absolute/private/luna-test-predictions.jsonl \
+  /absolute/private/luna-test-predictions.jsonl.sha256 \
+  /absolute/private/luna-response-provenance.json \
+  /absolute/private/luna-response-provenance.json.sha256 \
+  /workspace/tma-menu-vlm
 ```
 
 This rsyncs public code without `.git`, `.venv`, or `.env`, and transfers the
-private archive plus sidecar directly over SSH. No image or record enters Git or
-a public artifact store.
+private archive, Luna prediction JSONL, approved response provenance, and their
+sidecars directly over SSH. It validates both Luna evidence checksums before any
+remote action. No image, record, or Luna
+prediction enters Git or a public artifact store. The Luna inputs must use the
+reserved names shown above; the dataset archive may not reuse any of them.
 
 ## 4. Run detached and monitor
 
 ```bash
 scripts/runpod/run-training.sh POD_ID /workspace/tma-menu-vlm \
-  compiled.tar.gz /absolute/local/path/to/POD_ID.json
+  compiled.tar.gz luna-test-predictions.jsonl \
+  luna-test-predictions.jsonl.sha256 luna-response-provenance.json \
+  luna-response-provenance.json.sha256 /absolute/local/path/to/POD_ID.json
 
 runpodctl pod logs POD_ID --follow
 # Or use `runpodctl ssh info POD_ID`, then tail:
@@ -97,9 +130,19 @@ The remote script verifies checksums before extraction, installs the frozen
 training environment, runs training, evaluates every validation checkpoint,
 selects by structural/item/loss policy, reruns canonical selected validation,
 evaluates validation/test robustness, consumes primary test once through its
-fixed identity gate, and creates a checksummed adapter bundle containing every
-prediction/metric stream. Success ends with
+fixed identity gate with the checksum-verified saved Luna baseline, and creates
+a checksummed adapter bundle containing every prediction/metric stream plus the
+exact Luna test predictions and approved raw-response provenance. The pod copies
+both to their fixed run paths and rechecks both sidecars; it rechecks the baseline
+again immediately before
+the frozen test evaluation. Success ends with
 `TRAIN_EVAL_BUNDLE_DONE`; a merely running pod is not proof.
+Bundle creation independently revalidates the completed test gate and requires
+its Luna SHA-256 to match the copied fixed-path baseline, closing any mutation
+window between frozen evaluation and artifact packaging. The gate also freezes the
+exact compiled manifest file SHA-256. Bundle creation binds the copied fixed-name
+provenance role to the public approved aggregate anchor and requires its baseline
+digest to equal the copied Luna prediction bytes.
 
 ## 5. Retrieve and verify before deletion
 

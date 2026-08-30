@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -574,6 +575,264 @@ esac
         "pod delete pod123",
         "pod get pod123",
     ]
+
+
+def test_transfer_requires_and_sends_checksummed_luna_evidence(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    invocation_log = tmp_path / "invocations"
+    _write_executable(
+        fake_bin / "runpodctl",
+        "#!/usr/bin/env bash\necho '{\"ip\":\"127.0.0.1\",\"port\":22,"
+        "\"ssh_key\":{\"path\":\"/tmp/synthetic-key\"}}'\n",
+    )
+    _write_executable(
+        fake_bin / "ssh",
+        '#!/usr/bin/env bash\necho "ssh $*" >> "$FAKE_INVOCATION_LOG"\n',
+    )
+    _write_executable(
+        fake_bin / "rsync",
+        '#!/usr/bin/env bash\necho "rsync $*" >> "$FAKE_INVOCATION_LOG"\n',
+    )
+    archive = tmp_path / "dataset.tar.gz"
+    archive.write_bytes(b"synthetic archive")
+    Path(str(archive) + ".sha256").write_text("synthetic\n", encoding="utf-8")
+    baseline = tmp_path / "luna-test-predictions.jsonl"
+    baseline.write_text('{"example_id":"synthetic"}\n', encoding="utf-8")
+    digest = hashlib.sha256(baseline.read_bytes()).hexdigest()
+    sidecar = tmp_path / "luna-test-predictions.jsonl.sha256"
+    sidecar.write_text(f"{digest}  {baseline.name}\n", encoding="utf-8")
+    provenance = tmp_path / "luna-response-provenance.json"
+    provenance.write_text('{"synthetic":"provenance"}\n', encoding="utf-8")
+    provenance_digest = hashlib.sha256(provenance.read_bytes()).hexdigest()
+    provenance_sidecar = tmp_path / "luna-response-provenance.json.sha256"
+    provenance_sidecar.write_text(
+        f"{provenance_digest}  {provenance.name}\n", encoding="utf-8"
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "FAKE_INVOCATION_LOG": str(invocation_log),
+    }
+
+    result = _run(
+        "bash",
+        str(RUNPOD / "transfer-to-pod.sh"),
+        "pod123",
+        str(ROOT),
+        str(archive),
+        str(baseline),
+        str(sidecar),
+        str(provenance),
+        str(provenance_sidecar),
+        "/workspace/synthetic-run",
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    invocations = invocation_log.read_text(encoding="utf-8")
+    assert str(baseline) in invocations
+    assert str(sidecar) in invocations
+    assert str(provenance) in invocations
+    assert str(provenance_sidecar) in invocations
+    assert "/workspace/synthetic-run/incoming/" in invocations
+
+
+@pytest.mark.parametrize("damaged", ["baseline", "provenance"])
+def test_transfer_rejects_luna_checksum_drift_before_remote_action(
+    tmp_path: Path, damaged: str
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    invocation_log = tmp_path / "invocations"
+    _write_executable(
+        fake_bin / "runpodctl",
+        '#!/usr/bin/env bash\necho "$*" >> "$FAKE_INVOCATION_LOG"\nexit 99\n',
+    )
+    archive = tmp_path / "dataset.tar.gz"
+    archive.write_bytes(b"synthetic archive")
+    Path(str(archive) + ".sha256").write_text("synthetic\n", encoding="utf-8")
+    baseline = tmp_path / "luna-test-predictions.jsonl"
+    baseline.write_text("drift\n", encoding="utf-8")
+    baseline_digest = hashlib.sha256(baseline.read_bytes()).hexdigest()
+    sidecar = tmp_path / "luna-test-predictions.jsonl.sha256"
+    sidecar.write_text(f"{baseline_digest}  {baseline.name}\n", encoding="utf-8")
+    provenance = tmp_path / "luna-response-provenance.json"
+    provenance.write_text("{}\n", encoding="utf-8")
+    provenance_digest = hashlib.sha256(provenance.read_bytes()).hexdigest()
+    provenance_sidecar = tmp_path / "luna-response-provenance.json.sha256"
+    provenance_sidecar.write_text(
+        f"{provenance_digest}  {provenance.name}\n", encoding="utf-8"
+    )
+    damaged_file = sidecar if damaged == "baseline" else provenance_sidecar
+    damaged_name = baseline.name if damaged == "baseline" else provenance.name
+    damaged_file.write_text(f"{'a' * 64}  {damaged_name}\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "FAKE_INVOCATION_LOG": str(invocation_log),
+    }
+
+    result = _run(
+        "bash",
+        str(RUNPOD / "transfer-to-pod.sh"),
+        "pod123",
+        str(ROOT),
+        str(archive),
+        str(baseline),
+        str(sidecar),
+        str(provenance),
+        str(provenance_sidecar),
+        "/workspace/synthetic-run",
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "checksum does not match" in result.stderr
+    assert not invocation_log.exists()
+
+
+def test_run_training_forwards_required_luna_evidence_to_remote_job(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    invocation_log = tmp_path / "invocations"
+    _write_executable(
+        fake_bin / "runpodctl",
+        "#!/usr/bin/env bash\necho '{\"ip\":\"127.0.0.1\",\"port\":22,"
+        "\"ssh_key\":{\"path\":\"/tmp/synthetic-key\"}}'\n",
+    )
+    _write_executable(
+        fake_bin / "ssh",
+        '#!/usr/bin/env bash\necho "$*" >> "$FAKE_INVOCATION_LOG"\necho LAUNCHED\n',
+    )
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text(
+        json.dumps({"pod_id": "pod123", "delete_after_epoch": int(time.time()) + 3600}),
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "FAKE_INVOCATION_LOG": str(invocation_log),
+    }
+
+    result = _run(
+        "bash",
+        str(RUNPOD / "run-training.sh"),
+        "pod123",
+        "/workspace/synthetic-run",
+        "dataset.tar.gz",
+        "luna-test-predictions.jsonl",
+        "luna-test-predictions.jsonl.sha256",
+        "luna-response-provenance.json",
+        "luna-response-provenance.json.sha256",
+        str(receipt),
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    invocation = invocation_log.read_text(encoding="utf-8")
+    assert "on-pod-train.sh" in invocation
+    assert "luna-test-predictions.jsonl" in invocation
+    assert "luna-test-predictions.jsonl.sha256" in invocation
+    assert "luna-response-provenance.json" in invocation
+    assert "luna-response-provenance.json.sha256" in invocation
+
+
+def test_on_pod_script_always_verifies_evaluates_and_bundles_luna_baseline() -> None:
+    script = (RUNPOD / "on-pod-train.sh").read_text(encoding="utf-8")
+
+    assert script.count("verify-sidecar") == 5
+    assert 'luna_run="$run/luna-test-predictions.jsonl"' in script
+    assert '--luna-predictions "$luna_run"' in script
+    assert '--dataset-manifest "$dataset/manifest.json"' in script
+    assert '"luna_test_predictions":"luna-test-predictions.jsonl"' in script
+    assert 'provenance_run="$run/luna-response-provenance.json"' in script
+    assert '"luna_response_provenance":"luna-response-provenance.json"' in script
+    assert '"dataset_manifest_sha256"' in script
+    assert "LUNA_TEST_PREDICTIONS" not in script
+
+
+@pytest.mark.parametrize(
+    ("archive", "baseline", "sidecar", "provenance", "provenance_sidecar"),
+    [
+        (
+            "dataset.tar.gz",
+            "caller-controlled.jsonl",
+            "caller-controlled.jsonl.sha256",
+            "luna-response-provenance.json",
+            "luna-response-provenance.json.sha256",
+        ),
+        (
+            "luna-test-predictions.jsonl",
+            "luna-test-predictions.jsonl",
+            "luna-test-predictions.jsonl.sha256",
+            "luna-response-provenance.json",
+            "luna-response-provenance.json.sha256",
+        ),
+        (
+            "luna-test-predictions.jsonl.sha256",
+            "luna-test-predictions.jsonl",
+            "luna-test-predictions.jsonl.sha256",
+            "luna-response-provenance.json",
+            "luna-response-provenance.json.sha256",
+        ),
+        (
+            "luna-response-provenance.json",
+            "luna-test-predictions.jsonl",
+            "luna-test-predictions.jsonl.sha256",
+            "luna-response-provenance.json",
+            "luna-response-provenance.json.sha256",
+        ),
+        (
+            "dataset.tar.gz",
+            "luna-test-predictions.jsonl",
+            "luna-test-predictions.jsonl.sha256",
+            "caller-controlled.json",
+            "luna-response-provenance.json.sha256",
+        ),
+    ],
+)
+def test_training_rejects_caller_controlled_or_colliding_luna_names_before_remote_action(
+    tmp_path: Path,
+    archive: str,
+    baseline: str,
+    sidecar: str,
+    provenance: str,
+    provenance_sidecar: str,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    invocation_log = tmp_path / "invocations"
+    _write_executable(
+        fake_bin / "runpodctl",
+        '#!/usr/bin/env bash\necho "$*" >> "$FAKE_INVOCATION_LOG"\nexit 99\n',
+    )
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text("{}\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "FAKE_INVOCATION_LOG": str(invocation_log),
+    }
+
+    result = _run(
+        "bash",
+        str(RUNPOD / "run-training.sh"),
+        "pod123",
+        "/workspace/synthetic-run",
+        archive,
+        baseline,
+        sidecar,
+        provenance,
+        provenance_sidecar,
+        str(receipt),
+        env=env,
+    )
+
+    assert result.returncode == 2
+    assert "reserved" in result.stderr
+    assert not invocation_log.exists()
 
 
 def _write_executable(path: Path, text: str) -> None:

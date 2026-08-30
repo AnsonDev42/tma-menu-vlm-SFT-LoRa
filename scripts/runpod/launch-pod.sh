@@ -22,6 +22,7 @@ if [[ -n "$data_center_id" && ! "$data_center_id" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0
   runpod_die "DATA_CENTER_ID is unsafe"
 fi
 : "${RUNPOD_API_KEY:?RUNPOD_API_KEY must be set in the environment}"
+: "${RUNPOD_MAX_COST_USD:=15}"
 command -v runpodctl >/dev/null || runpod_die "runpodctl is not installed"
 validate_delete_retry_config
 
@@ -57,7 +58,7 @@ runpodctl user > "$scratch/user.json"
 runpodctl gpu list --include-unavailable > "$scratch/gpu-catalog.json"
 quote_args=(quote --gpu-catalog "$scratch/gpu-catalog.json" --user "$scratch/user.json"
   --gpu-id "$gpu_id" --cloud-type SECURE --hours "$max_hours"
-  --container-gb "$container_gb" --volume-gb "$volume_gb" --cap-usd 15)
+  --container-gb "$container_gb" --volume-gb "$volume_gb" --cap-usd "$RUNPOD_MAX_COST_USD")
 if [[ -n "$data_center_id" ]]; then
   quote_args+=(--data-center-id "$data_center_id")
 fi

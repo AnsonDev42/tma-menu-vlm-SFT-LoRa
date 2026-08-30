@@ -150,6 +150,7 @@ container storage and 100 GB workspace storage.
 
 ```bash
 export RUNPOD_API_KEY=... # shell environment only
+export RUNPOD_MAX_COST_USD=10 # hard budget for this run; must be <= 15
 runpodctl update
 runpodctl version
 runpodctl user
@@ -160,8 +161,9 @@ scripts/runpod/launch-pod.sh \
 ```
 
 Replace `TEMPLATE_ID` and `EU-SE-1` with a currently available official template
-and data center. The launcher obtains the live GPU price, enforces the current
-USD 15 combined compute/storage cap, writes a guard receipt, and arms a
+and data center. The launcher obtains the live GPU price, enforces
+`RUNPOD_MAX_COST_USD` (USD 10 in this example; never more than USD 15) across
+compute and storage, writes a guard receipt, and arms a
 host-local deletion watchdog. Keep the launching Mac awake until cleanup; the
 watchdog cannot run while it is asleep. Save the returned `POD_ID` and guard
 receipt path:

@@ -176,6 +176,16 @@ def test_cost_quote_uses_catalog_price_storage_and_fails_closed(tmp_path: Path) 
     over_cap = _run(*over_cap_command)
     assert over_cap.returncode == 2
     assert "$15" in over_cap.stderr
+    tighter_cap_command = list(command)
+    tighter_cap_command[tighter_cap_command.index("--cap-usd") + 1] = "0.50"
+    tighter_cap = _run(*tighter_cap_command)
+    assert tighter_cap.returncode == 2
+    assert "$0.5000" in tighter_cap.stderr
+    excessive_cap_command = list(command)
+    excessive_cap_command[excessive_cap_command.index("--cap-usd") + 1] = "15.01"
+    excessive_cap = _run(*excessive_cap_command)
+    assert excessive_cap.returncode == 2
+    assert "may not exceed $15" in excessive_cap.stderr
     subsecond_command = list(command)
     subsecond_command[subsecond_command.index("--hours") + 1] = "0.0001"
     subsecond = _run(*subsecond_command)
@@ -257,6 +267,7 @@ esac
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "RUNPOD_API_KEY": "synthetic-test-key",
+        "RUNPOD_MAX_COST_USD": "10",
         "RUNPOD_GUARD_DIR": str(guard_dir),
         "FAKE_INVOCATION_LOG": str(invocation_log),
         "FAKE_STATE_DIR": str(state_dir),
@@ -288,6 +299,7 @@ esac
     assert "--container-disk-in-gb 20" in create
     assert "--volume-in-gb 100" in create
     assert "--cloud-type SECURE" in create
+    assert json.loads(receipt.read_text())["quote"]["cap_usd"] == "10"
     watchdog_log = Path(payload["cost_guard"]["watchdog_log"])
     deadline = time.monotonic() + 4
     while (

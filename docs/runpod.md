@@ -8,12 +8,13 @@ then delete the pod](https://github.com/runpod/runpodctl).
 
 ## Cost and stop policy
 
-The hard combined compute/storage policy for this experiment is `$15`, retaining
-`$5` of the available credit for recovery. `launch-pod.sh` reads the selected
+Set `RUNPOD_MAX_COST_USD` before launch to impose the hard combined
+compute/storage policy for that run (it defaults to `$15` and rejects any value
+above `$15`). `launch-pod.sh` reads the selected
 GPU's current on-demand price directly from `runpodctl gpu list
 --include-unavailable`, requires explicit container/volume sizes, adds Runpod's
 published running storage rates, checks the live account balance, and rejects a
-combined quote above `$15`. Caller-provided hourly prices are not accepted.
+combined quote above that cap. Caller-provided hourly prices are not accepted.
 
 Current `runpodctl` v2.12.0 has no `pod create --terminate-after` flag. The launch
 script therefore creates the pod with supported flags and immediately arms a
@@ -80,10 +81,12 @@ manifest before parsing; production has no fallback.
 
 ## 2. Launch with a bounded local deletion guard
 
-Pick a maximum duration and explicit disk sizes whose live combined quote is at
-most `$15`. Supply an official/current PyTorch template ID:
+Choose a cap and maximum duration before launch. For example, this makes the
+combined quote fail closed above `$10`; the cap may never exceed `$15`. Supply an
+official/current PyTorch template ID:
 
 ```bash
+export RUNPOD_MAX_COST_USD=10
 scripts/runpod/launch-pod.sh tma-qwen3-vl TEMPLATE_ID "NVIDIA A40" 8 20 100 DC_ID
 ```
 

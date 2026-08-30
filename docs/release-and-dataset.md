@@ -82,12 +82,18 @@ For every matched page, `_evaluation.call_path` must be exactly
 escapes, cache-key mismatches, or another subtree fail. The call's input image
 hash and exact TMA OCR digest must match the reference, its contract must match
 the report baseline contract, and its cache key is recomputed from those inputs.
+The contract itself is pinned to the current TMA extraction adapter, provider
+settings, excluded stages, runtime-version inventory, and safe hashed
+`src/**/*.py` source inventory; self-consistent but non-TMA contracts fail.
 The reference OCR text and order must also reproduce the compiled user prompt.
 The report execution and prediction must identify the same successful call and
-`tma.json` result with a stopped, error-free provider response. Only the sibling
-`provider.raw.json` is read, and it must contain exactly one stopped Luna
-assistant text response, with no refusal or tool/function call, whose compact
-JSON is schema-valid and references only the compiled OCR line range.
+`tma.json` result with a stopped, error-free provider response. That alias-safe
+materialized result must have the current typed result inventory, repeat the
+exact contract, and equal the prediction's embedded TMA result. Only the sibling
+`provider.raw.json` is read, and it must be an error-free typed ChatCompletion
+envelope containing exactly one stopped Luna assistant text response, with no
+refusal or tool/function call, whose compact JSON is schema-valid and references
+only the compiled OCR line range.
 
 The importer writes prediction JSONL ordered by compiled example ID and an exact
 `<output>.sha256` sidecar. Both are private test evidence: keep them outside Git,

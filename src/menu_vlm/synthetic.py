@@ -209,21 +209,33 @@ def create_synthetic_luna_evaluation(dataset: Path, output: Path) -> dict[str, A
     evaluation = root / "evaluation" / run_id
     documents = []
     contract = {
-        "adapter_version": "public-synthetic",
+        "adapter_version": "tma-core-extraction-v2",
         "model": "gpt-5.6-luna",
-        "endpoint": "chat.completions",
+        "endpoint": "https://api.openai.com/v1",
         "reasoning_effort": "none",
-        "image_detail": "high",
+        "image_detail": "low",
         "max_completion_tokens": 4096,
         "timeout_seconds": 75,
-        "source_sha256": {"public-synthetic.py": "a" * 64},
-        "loaded_source_paths": ["public-synthetic.py"],
+        "source_sha256": {
+            "src/core/config.py": "a" * 64,
+            "src/menu_engine/v2_openai.py": "b" * 64,
+        },
+        "loaded_source_paths": ["src/core/config.py", "src/menu_engine/v2_openai.py"],
         "adapter_source_sha256": "b" * 64,
-        "source_inventory": "public synthetic fixture",
-        "scope": "visual grouping only",
-        "excluded_stages": ["enrichment"],
+        "source_inventory": "all Python source files under backend/src, a deliberate safe "
+        "superset of local modules loaded by the replayed one-page path; installed packages "
+        "and native extensions are represented only by the listed runtime versions",
+        "scope": "Current local one-page TMA preprocessing, vision response materialization, "
+        "OCR fallback and result serialization using cached OCR",
+        "excluded_stages": [
+            "fresh OCR",
+            "translation",
+            "enrichment",
+            "API/auth/queue",
+            "refine pass",
+        ],
         "provider_retries": 0,
-        "runtime_versions": {"fixture": "1.0"},
+        "runtime_versions": {"openai": "1.0", "pydantic": "1.0", "Pillow": "1.0"},
     }
     try:
         for index, row in enumerate(read_jsonl(dataset_root / "test.jsonl"), 1):
@@ -255,6 +267,19 @@ def create_synthetic_luna_evaluation(dataset: Path, output: Path) -> dict[str, A
                 "provider_error": None,
                 "provider_finish_reason": "stop",
             }
+            tma_result = {
+                "contract": contract,
+                "results": [],
+                "items": [],
+                "vision_item_count": 0,
+                "fallback_item_count": 0,
+                "provider_error": None,
+                "provider_response_received": True,
+                "provider_finish_reason": "stop",
+                "provider_seconds": 0.01,
+                "extraction_seconds": 0.02,
+                "processed_image": {"sha256": image_sha256, "width": 320, "height": 240},
+            }
             write_json(
                 evaluation / "references" / f"{document_id}.json",
                 {
@@ -273,19 +298,34 @@ def create_synthetic_luna_evaluation(dataset: Path, output: Path) -> dict[str, A
             )
             write_json(
                 evaluation / "predictions" / f"{document_id}.json",
-                {"_evaluation": execution},
+                {
+                    "prediction": {
+                        "schema_version": "2.0",
+                        "currency": None,
+                        "sections": [],
+                        "unsectioned_items": [],
+                    },
+                    "tma": tma_result,
+                    "_evaluation": execution,
+                },
             )
             write_json(
                 root / call_path,
                 {"state": "succeeded", "inputs": inputs, "result_path": "tma.json"},
             )
+            write_json(root / "baselines" / "tma-core" / cache_key / "tma.json", tma_result)
             write_json(
                 root / "baselines" / "tma-core" / cache_key / "provider.raw.json",
                 {
+                    "id": f"chatcmpl-public-synthetic-{index}",
+                    "object": "chat.completion",
+                    "created": 0,
                     "model": "gpt-5.6-luna",
                     "choices": [
                         {
+                            "index": 0,
                             "finish_reason": "stop",
+                            "logprobs": None,
                             "message": {
                                 "role": "assistant",
                                 "content": canonical_json(row["target"]),
@@ -295,6 +335,11 @@ def create_synthetic_luna_evaluation(dataset: Path, output: Path) -> dict[str, A
                             }
                         }
                     ],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2,
+                    },
                 },
             )
             documents.append({"document_id": document_id, "execution": execution})

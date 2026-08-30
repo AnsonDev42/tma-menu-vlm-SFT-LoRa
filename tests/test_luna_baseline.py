@@ -110,7 +110,7 @@ def test_import_rejects_cache_key_that_is_not_exact_digest_of_inputs(tmp_path: P
     key = prediction["_evaluation"]["cache_key"]
     call_path = root / "baselines" / "tma-core" / key / "call.json"
     call = json.loads(call_path.read_text(encoding="utf-8"))
-    call["inputs"]["contract"]["scope"] = "changed but consistently reported"
+    call["inputs"]["contract"]["source_sha256"]["src/core/config.py"] = "c" * 64
     _write_json(call_path, call)
     report_path = root / "evaluation" / run_id / "report.json"
     report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -118,6 +118,74 @@ def test_import_rejects_cache_key_that_is_not_exact_digest_of_inputs(tmp_path: P
     _write_json(report_path, report)
 
     with pytest.raises(ValueError, match="cache digest"):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    [
+        ("extra-key", "key inventory"),
+        ("adapter-version", "critical settings"),
+        ("endpoint", "critical settings"),
+        ("image-detail", "critical settings"),
+        ("numeric-type", "typed critical settings"),
+        ("excluded-stages", "excluded stages"),
+        ("scope-type", "source or scope provenance"),
+        ("empty-sources", "no source hash inventory"),
+        ("unsafe-source", "invalid source hash inventory"),
+        ("uppercase-digest", "invalid source hash inventory"),
+        ("empty-loaded", "loaded source provenance"),
+        ("duplicate-loaded", "loaded source provenance"),
+        ("unknown-loaded", "loaded source provenance"),
+        ("adapter-digest", "adapter source hash"),
+        ("runtime-keys", "runtime versions"),
+        ("runtime-empty", "runtime versions"),
+    ],
+)
+def test_import_rejects_non_runtime_contract(
+    tmp_path: Path, damage: str, message: str
+) -> None:
+    dataset, root, run_id, _prediction_path, _document_id = _fixture(tmp_path)
+    report_path = root / "evaluation" / run_id / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    contract = report["baseline"]["contract"]
+    if damage == "extra-key":
+        contract["unexpected"] = True
+    elif damage == "adapter-version":
+        contract["adapter_version"] = "other"
+    elif damage == "endpoint":
+        contract["endpoint"] = "https://example.invalid/v1"
+    elif damage == "image-detail":
+        contract["image_detail"] = "high"
+    elif damage == "numeric-type":
+        contract["timeout_seconds"] = 75.0
+    elif damage == "excluded-stages":
+        contract["excluded_stages"] = ["fresh OCR"]
+    elif damage == "scope-type":
+        contract["scope"] = ["wrong type"]
+    elif damage == "empty-sources":
+        contract["source_sha256"] = {}
+    elif damage == "unsafe-source":
+        contract["source_sha256"] = {"../private.py": "a" * 64}
+    elif damage == "uppercase-digest":
+        contract["source_sha256"]["src/core/config.py"] = "A" * 64
+    elif damage == "empty-loaded":
+        contract["loaded_source_paths"] = []
+    elif damage == "duplicate-loaded":
+        contract["loaded_source_paths"].append(contract["loaded_source_paths"][0])
+    elif damage == "unknown-loaded":
+        contract["loaded_source_paths"] = ["src/unknown.py"]
+    elif damage == "adapter-digest":
+        contract["adapter_source_sha256"] = "not-a-digest"
+    elif damage == "runtime-keys":
+        contract["runtime_versions"] = {"openai": "1.0"}
+    elif damage == "runtime-empty":
+        contract["runtime_versions"]["openai"] = ""
+    else:  # pragma: no cover - parametrization is exhaustive
+        raise AssertionError(damage)
+    _write_json(report_path, report)
+
+    with pytest.raises(ValueError, match=message):
         import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 
@@ -180,6 +248,99 @@ def test_import_rejects_unexpected_call_result_path(tmp_path: Path) -> None:
         import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 
+def test_import_rejects_missing_materialized_result(tmp_path: Path) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+    key = prediction["_evaluation"]["cache_key"]
+    (root / "baselines" / "tma-core" / key / "tma.json").unlink()
+
+    with pytest.raises(ValueError, match="materialized result is missing"):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+def test_import_rejects_non_object_materialized_result(tmp_path: Path) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+    key = prediction["_evaluation"]["cache_key"]
+    result = root / "baselines" / "tma-core" / key / "tma.json"
+    _write_json(result, [])
+
+    with pytest.raises(ValueError, match="invalid key inventory"):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+def test_import_rejects_materialized_result_symlink_alias(tmp_path: Path) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+    key = prediction["_evaluation"]["cache_key"]
+    result = root / "baselines" / "tma-core" / key / "tma.json"
+    alias = result.with_name(".internal-result-alias.json")
+    shutil.copyfile(result, alias)
+    result.unlink()
+    result.symlink_to(alias)
+
+    with pytest.raises(ValueError, match="filesystem alias"):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    [
+        ("extra-key", "key inventory"),
+        ("contract", "contract mismatch"),
+        ("results-type", "collections are malformed"),
+        ("count-type", "counts are malformed"),
+        ("provider-received", "provider evidence is contradictory"),
+        ("provider-error", "provider evidence is contradictory"),
+        ("finish-reason", "provider evidence is contradictory"),
+        ("timing", "timings are malformed"),
+        ("processed-image", "processed image evidence is malformed"),
+    ],
+)
+def test_import_rejects_invalid_materialized_result(
+    tmp_path: Path, damage: str, message: str
+) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+    key = prediction["_evaluation"]["cache_key"]
+    result_path = root / "baselines" / "tma-core" / key / "tma.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    if damage == "extra-key":
+        result["unexpected"] = True
+    elif damage == "contract":
+        result["contract"]["adapter_source_sha256"] = "c" * 64
+    elif damage == "results-type":
+        result["results"] = {}
+    elif damage == "count-type":
+        result["vision_item_count"] = True
+    elif damage == "provider-received":
+        result["provider_response_received"] = False
+    elif damage == "provider-error":
+        result["provider_error"] = "SyntheticProviderError"
+    elif damage == "finish-reason":
+        result["provider_finish_reason"] = "length"
+    elif damage == "timing":
+        result["provider_seconds"] = -1
+    elif damage == "processed-image":
+        result["processed_image"]["width"] = 0
+    else:  # pragma: no cover - parametrization is exhaustive
+        raise AssertionError(damage)
+    _write_json(result_path, result)
+
+    with pytest.raises(ValueError, match=message):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+def test_import_rejects_prediction_not_bound_to_materialized_result(tmp_path: Path) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+    prediction["tma"]["provider_seconds"] = 0.03
+    _write_json(prediction_path, prediction)
+
+    with pytest.raises(ValueError, match="not bound to its materialized result"):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
 def test_import_rejects_report_execution_mismatch(tmp_path: Path) -> None:
     dataset, root, run_id, _prediction_path, _document_id = _fixture(tmp_path)
     report_path = root / "evaluation" / run_id / "report.json"
@@ -215,6 +376,43 @@ def test_import_rejects_non_stop_provider_finish_reason(tmp_path: Path) -> None:
     _write_json(raw_path, raw)
 
     with pytest.raises(ValueError, match="finish with stop"):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+def test_import_rejects_top_level_provider_error(tmp_path: Path) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+    key = prediction["_evaluation"]["cache_key"]
+    raw_path = root / "baselines" / "tma-core" / key / "provider.raw.json"
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    raw["error"] = {"type": "synthetic_error"}
+    _write_json(raw_path, raw)
+
+    with pytest.raises(ValueError, match="top-level error"):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("object", "other"),
+        ("id", ""),
+        ("created", True),
+        ("usage", []),
+    ],
+)
+def test_import_rejects_invalid_provider_envelope(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+    key = prediction["_evaluation"]["cache_key"]
+    raw_path = root / "baselines" / "tma-core" / key / "provider.raw.json"
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    raw[field] = value
+    _write_json(raw_path, raw)
+
+    with pytest.raises(ValueError, match="invalid completion envelope"):
         import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
 
 

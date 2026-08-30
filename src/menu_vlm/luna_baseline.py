@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -21,6 +22,64 @@ _CURRENT_LUNA_MODEL = "current-tma-core:gpt-5.6-luna"
 _PROVIDER_MODEL = "gpt-5.6-luna"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_SAFE_SOURCE_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
+_CONTRACT_KEYS = {
+    "adapter_version",
+    "model",
+    "endpoint",
+    "reasoning_effort",
+    "image_detail",
+    "max_completion_tokens",
+    "timeout_seconds",
+    "source_sha256",
+    "loaded_source_paths",
+    "adapter_source_sha256",
+    "source_inventory",
+    "scope",
+    "excluded_stages",
+    "provider_retries",
+    "runtime_versions",
+}
+_CONTRACT_FIXED = {
+    "adapter_version": "tma-core-extraction-v2",
+    "model": _PROVIDER_MODEL,
+    "endpoint": "https://api.openai.com/v1",
+    "reasoning_effort": "none",
+    "image_detail": "low",
+    "max_completion_tokens": 4096,
+    "timeout_seconds": 75,
+    "provider_retries": 0,
+}
+_SOURCE_INVENTORY = (
+    "all Python source files under backend/src, a deliberate safe superset of local modules "
+    "loaded by the replayed one-page path; installed packages and native extensions are "
+    "represented only by the listed runtime versions"
+)
+_SCOPE = (
+    "Current local one-page TMA preprocessing, vision response materialization, OCR fallback "
+    "and result serialization using cached OCR"
+)
+_EXCLUDED_STAGES = [
+    "fresh OCR",
+    "translation",
+    "enrichment",
+    "API/auth/queue",
+    "refine pass",
+]
+_RUNTIME_VERSION_KEYS = {"openai", "pydantic", "Pillow"}
+_TMA_RESULT_KEYS = {
+    "contract",
+    "results",
+    "items",
+    "vision_item_count",
+    "fallback_item_count",
+    "provider_error",
+    "provider_response_received",
+    "provider_finish_reason",
+    "provider_seconds",
+    "extraction_seconds",
+    "processed_image",
+}
 
 
 @dataclass(frozen=True)
@@ -156,8 +215,9 @@ def _validate_completed_run(evaluation_root: Path, evaluation_run: str) -> _Comp
         raise ValueError("TMA evaluation is not the required current Luna model")
     baseline = report.get("baseline")
     contract = baseline.get("contract") if isinstance(baseline, dict) else None
-    if not isinstance(contract, dict) or contract.get("model") != _PROVIDER_MODEL:
+    if not isinstance(contract, dict):
         raise ValueError("TMA evaluation has mismatched Luna contract provenance")
+    _validate_runtime_contract(contract)
     documents = report.get("documents")
     if not isinstance(documents, list) or not documents:
         raise ValueError("TMA evaluation report has no completed documents")
@@ -272,6 +332,14 @@ def _read_provider_compact_output(
         raise ValueError(f"TMA call/OCR identity mismatch: {document_id}")
     if _tma_digest(inputs) != cache_key:
         raise ValueError(f"TMA cache digest does not match exact call inputs: {document_id}")
+    result_relative = expected.with_name("tma.json")
+    result_file = _exact_relative(tma_root, str(result_relative), label="TMA result")
+    if not result_file.is_file():
+        raise ValueError(f"TMA materialized result is missing: {document_id}")
+    result = read_json(result_file)
+    _validate_materialized_result(result, report_contract, document_id)
+    if prediction.get("tma") != result:
+        raise ValueError(f"TMA prediction is not bound to its materialized result: {document_id}")
     raw_relative = expected.with_name("provider.raw.json")
     raw_file = _exact_relative(tma_root, str(raw_relative), label="provider response")
     if not raw_file.is_file():
@@ -279,6 +347,16 @@ def _read_provider_compact_output(
     raw = read_json(raw_file)
     if not isinstance(raw, dict):
         raise ValueError(f"TMA provider response must be a JSON object: {document_id}")
+    if "error" in raw:
+        raise ValueError(f"TMA provider response contains a top-level error: {document_id}")
+    if (
+        raw.get("object") != "chat.completion"
+        or not isinstance(raw.get("id"), str)
+        or not raw["id"].strip()
+        or not _is_nonnegative_int(raw.get("created"))
+        or not isinstance(raw.get("usage"), dict)
+    ):
+        raise ValueError(f"TMA provider response has an invalid completion envelope: {document_id}")
     model = raw.get("model")
     if not isinstance(model, str) or not (
         model == _PROVIDER_MODEL or model.startswith(_PROVIDER_MODEL + "-")
@@ -288,7 +366,11 @@ def _read_provider_compact_output(
     if not isinstance(choices, list) or len(choices) != 1:
         raise ValueError(f"TMA provider response must have exactly one choice: {document_id}")
     choice = choices[0]
-    if not isinstance(choice, dict) or choice.get("finish_reason") != "stop":
+    if (
+        not isinstance(choice, dict)
+        or not _is_nonnegative_int(choice.get("index"))
+        or choice.get("finish_reason") != "stop"
+    ):
         raise ValueError(f"TMA provider response did not finish with stop: {document_id}")
     message = choice.get("message")
     content = message.get("content") if isinstance(message, dict) else None
@@ -340,6 +422,122 @@ def _validate_reference_ocr(
     if content[0].get("text") != expected:
         raise ValueError(f"TMA reference OCR does not match compiled prompt order: {document_id}")
     return raw_ocr, count
+
+
+def _validate_runtime_contract(contract: dict[str, Any]) -> None:
+    if set(contract) != _CONTRACT_KEYS:
+        raise ValueError("TMA runtime contract has an unexpected key inventory")
+    if any(contract.get(key) != value for key, value in _CONTRACT_FIXED.items()):
+        raise ValueError("TMA runtime contract has unexpected critical settings")
+    if any(
+        not isinstance(contract.get(key), int) or isinstance(contract.get(key), bool)
+        for key in ("max_completion_tokens", "timeout_seconds", "provider_retries")
+    ):
+        raise ValueError("TMA runtime contract has incorrectly typed critical settings")
+    if contract.get("source_inventory") != _SOURCE_INVENTORY or contract.get("scope") != _SCOPE:
+        raise ValueError("TMA runtime contract has unexpected source or scope provenance")
+    if contract.get("excluded_stages") != _EXCLUDED_STAGES:
+        raise ValueError("TMA runtime contract has unexpected excluded stages")
+    source_sha256 = contract.get("source_sha256")
+    if not isinstance(source_sha256, dict) or not source_sha256:
+        raise ValueError("TMA runtime contract has no source hash inventory")
+    for path, digest in source_sha256.items():
+        if (
+            not _is_safe_source_path(path)
+            or not isinstance(digest, str)
+            or not _DIGEST.fullmatch(digest)
+        ):
+            raise ValueError("TMA runtime contract has an invalid source hash inventory")
+    loaded = contract.get("loaded_source_paths")
+    if (
+        not isinstance(loaded, list)
+        or not loaded
+        or any(not isinstance(path, str) for path in loaded)
+        or len(loaded) != len(set(loaded))
+        or not set(loaded).issubset(source_sha256)
+    ):
+        raise ValueError("TMA runtime contract has invalid loaded source provenance")
+    adapter_digest = contract.get("adapter_source_sha256")
+    if not isinstance(adapter_digest, str) or not _DIGEST.fullmatch(adapter_digest):
+        raise ValueError("TMA runtime contract has an invalid adapter source hash")
+    versions = contract.get("runtime_versions")
+    if (
+        not isinstance(versions, dict)
+        or set(versions) != _RUNTIME_VERSION_KEYS
+        or any(not isinstance(value, str) or not value.strip() for value in versions.values())
+    ):
+        raise ValueError("TMA runtime contract has invalid runtime versions")
+
+
+def _validate_materialized_result(
+    result: Any, report_contract: dict[str, Any], document_id: str
+) -> None:
+    if not isinstance(result, dict) or set(result) != _TMA_RESULT_KEYS:
+        raise ValueError(f"TMA materialized result has an invalid key inventory: {document_id}")
+    if result.get("contract") != report_contract:
+        raise ValueError(f"TMA materialized result contract mismatch: {document_id}")
+    if not isinstance(result.get("results"), list) or not isinstance(result.get("items"), list):
+        raise ValueError(f"TMA materialized result collections are malformed: {document_id}")
+    if not _is_nonnegative_int(result.get("vision_item_count")) or not _is_nonnegative_int(
+        result.get("fallback_item_count")
+    ):
+        raise ValueError(f"TMA materialized result counts are malformed: {document_id}")
+    if (
+        result.get("provider_error") is not None
+        or result.get("provider_response_received") is not True
+        or result.get("provider_finish_reason") != "stop"
+    ):
+        raise ValueError(
+            f"TMA materialized result provider evidence is contradictory: {document_id}"
+        )
+    if not _is_nonnegative_number(result.get("provider_seconds")) or not _is_nonnegative_number(
+        result.get("extraction_seconds")
+    ):
+        raise ValueError(f"TMA materialized result timings are malformed: {document_id}")
+    processed = result.get("processed_image")
+    if (
+        not isinstance(processed, dict)
+        or set(processed) != {"sha256", "width", "height"}
+        or not isinstance(processed.get("sha256"), str)
+        or not _DIGEST.fullmatch(processed["sha256"])
+        or not _is_positive_int(processed.get("width"))
+        or not _is_positive_int(processed.get("height"))
+    ):
+        raise ValueError(f"TMA materialized processed image evidence is malformed: {document_id}")
+
+
+def _is_safe_source_path(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    path = PurePosixPath(value)
+    return (
+        not path.is_absolute()
+        and path.as_posix() == value
+        and len(path.parts) >= 2
+        and path.parts[0] == "src"
+        and path.suffix == ".py"
+        and all(
+            part not in {"", ".", ".."} and _SAFE_SOURCE_PART.fullmatch(part)
+            for part in path.parts
+        )
+    )
+
+
+def _is_nonnegative_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_positive_int(value: Any) -> bool:
+    return _is_nonnegative_int(value) and value > 0
+
+
+def _is_nonnegative_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0
+    )
 
 
 def _tma_digest(value: Any) -> str:

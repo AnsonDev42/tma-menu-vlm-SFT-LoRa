@@ -1,4 +1,6 @@
 import copy
+import hashlib
+import json
 import shutil
 from pathlib import Path
 from typing import Any
@@ -11,7 +13,6 @@ from .jsonio import (
     read_json,
     read_jsonl,
     sha256_file,
-    sha256_json,
     write_json,
     write_jsonl,
 )
@@ -207,31 +208,76 @@ def create_synthetic_luna_evaluation(dataset: Path, output: Path) -> dict[str, A
     run_id = "public-synthetic-luna"
     evaluation = root / "evaluation" / run_id
     documents = []
+    contract = {
+        "adapter_version": "public-synthetic",
+        "model": "gpt-5.6-luna",
+        "endpoint": "chat.completions",
+        "reasoning_effort": "none",
+        "image_detail": "high",
+        "max_completion_tokens": 4096,
+        "timeout_seconds": 75,
+        "source_sha256": {"public-synthetic.py": "a" * 64},
+        "loaded_source_paths": ["public-synthetic.py"],
+        "adapter_source_sha256": "b" * 64,
+        "source_inventory": "public synthetic fixture",
+        "scope": "visual grouping only",
+        "excluded_stages": ["enrichment"],
+        "provider_retries": 0,
+        "runtime_versions": {"fixture": "1.0"},
+    }
     try:
         for index, row in enumerate(read_jsonl(dataset_root / "test.jsonl"), 1):
             document_id = f"synthetic-tma-{index:04d}"
             image_sha256 = sha256_file(dataset_root / row["image"])
-            cache_key = sha256_json(
-                {"fixture": "public-synthetic", "document_id": document_id}
-            )
+            ocr = {
+                "schema_version": "1.0",
+                "provider": "public-synthetic",
+                "image_width": 320,
+                "image_height": 240,
+                "spans": [
+                    _span(1, "Grill", 0.1),
+                    _span(2, "Steak $12", 0.3),
+                    _span(3, "charred vegetables", 0.5),
+                    _span(4, "Best served rare", 0.7),
+                ],
+            }
+            inputs = {
+                "contract": contract,
+                "image_sha256": image_sha256,
+                "ocr_sha256": _tma_digest(ocr),
+            }
+            cache_key = _tma_digest(inputs)
             call_path = f"baselines/tma-core/{cache_key}/call.json"
+            execution = {
+                "state": "succeeded",
+                "cache_key": cache_key,
+                "call_path": call_path,
+                "provider_error": None,
+                "provider_finish_reason": "stop",
+            }
             write_json(
                 evaluation / "references" / f"{document_id}.json",
-                {"document_id": document_id, "image": {"sha256": image_sha256}},
-            )
-            write_json(
-                evaluation / "predictions" / f"{document_id}.json",
                 {
-                    "_evaluation": {
-                        "state": "succeeded",
-                        "cache_key": cache_key,
-                        "call_path": call_path,
-                    }
+                    "document_id": document_id,
+                    "image": {
+                        "path": row["image"],
+                        "sha256": image_sha256,
+                        "original_name": "public-synthetic.svg",
+                    },
+                    "ocr": ocr,
+                    "annotation": {"public_synthetic_fixture": True},
+                    "metadata": {"synthetic": True},
+                    "source": {"kind": "public-synthetic"},
+                    "validation_issues": [],
                 },
             )
             write_json(
+                evaluation / "predictions" / f"{document_id}.json",
+                {"_evaluation": execution},
+            )
+            write_json(
                 root / call_path,
-                {"state": "succeeded", "inputs": {"image_sha256": image_sha256}},
+                {"state": "succeeded", "inputs": inputs, "result_path": "tma.json"},
             )
             write_json(
                 root / "baselines" / "tma-core" / cache_key / "provider.raw.json",
@@ -239,15 +285,19 @@ def create_synthetic_luna_evaluation(dataset: Path, output: Path) -> dict[str, A
                     "model": "gpt-5.6-luna",
                     "choices": [
                         {
+                            "finish_reason": "stop",
                             "message": {
                                 "role": "assistant",
                                 "content": canonical_json(row["target"]),
+                                "refusal": None,
+                                "tool_calls": None,
+                                "function_call": None,
                             }
                         }
                     ],
                 },
             )
-            documents.append({"document_id": document_id})
+            documents.append({"document_id": document_id, "execution": execution})
         metadata = {
             "run_id": run_id,
             "status": "complete",
@@ -259,7 +309,7 @@ def create_synthetic_luna_evaluation(dataset: Path, output: Path) -> dict[str, A
             {
                 **metadata,
                 "completed_document_count": len(documents),
-                "baseline": {"contract": {"model": "gpt-5.6-luna"}},
+                "baseline": {"contract": contract},
                 "documents": documents,
             },
         )
@@ -268,6 +318,10 @@ def create_synthetic_luna_evaluation(dataset: Path, output: Path) -> dict[str, A
     except Exception:
         shutil.rmtree(root, ignore_errors=True)
         raise
+
+
+def _tma_digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
 def _record(

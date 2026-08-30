@@ -95,7 +95,8 @@ scripts/runpod/transfer-to-pod.sh POD_ID "$PWD" \
 This rsyncs public code without `.git`, `.venv`, or `.env`, and transfers the
 private archive, Luna prediction JSONL, and both sidecars directly over SSH. It
 validates the Luna checksum before any remote action. No image, record, or Luna
-prediction enters Git or a public artifact store.
+prediction enters Git or a public artifact store. The Luna inputs must use the
+reserved names shown above; the dataset archive may not reuse either name.
 
 ## 4. Run detached and monitor
 
@@ -115,7 +116,9 @@ selects by structural/item/loss policy, reruns canonical selected validation,
 evaluates validation/test robustness, consumes primary test once through its
 fixed identity gate with the checksum-verified saved Luna baseline, and creates
 a checksummed adapter bundle containing every prediction/metric stream plus the
-exact Luna test predictions. Success ends with
+exact Luna test predictions. The pod copies that baseline to the fixed run path
+`run/luna-test-predictions.jsonl` and rechecks its sidecar immediately before
+the frozen test evaluation. Success ends with
 `TRAIN_EVAL_BUNDLE_DONE`; a merely running pod is not proof.
 
 ## 5. Retrieve and verify before deletion

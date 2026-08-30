@@ -12,7 +12,7 @@ The return bundle is adapter-only and must contain exactly these roles:
 | `checkpoint_candidates`, `checkpoint_selection` | Every candidate and structural F1 -> item F1 -> loss rationale |
 | `selected_validation_predictions`, `selected_validation_metrics` | Canonical selected-checkpoint validation evidence |
 | `robustness_validation_predictions`, `robustness_validation_metrics` | Held-out validation derivative evidence |
-| `luna_test_predictions` | Imported current-TMA Luna predictions used for the frozen comparison |
+| `luna_test_predictions` | Imported current-TMA Luna predictions from the fixed `luna-test-predictions.jsonl` run path used for the frozen comparison |
 | `test_predictions`, `test_metrics`, `test_gate` | Frozen primary test evidence and durable identity gate |
 | `robustness_test_predictions`, `robustness_test_metrics` | Held-out test derivative evidence |
 | `hardware`, `commands` | GPU/runtime facts and replay commands |

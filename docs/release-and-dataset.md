@@ -80,9 +80,14 @@ accounting, and a one-to-one image SHA-256 match with compiled `test.jsonl`.
 For every matched page, `_evaluation.call_path` must be exactly
 `baselines/tma-core/<cache-sha256>/call.json`; absolute paths, traversal, symlink
 escapes, cache-key mismatches, or another subtree fail. The call's input image
-hash must match the reference. Only the sibling `provider.raw.json` is read, and
-it must contain exactly one Luna assistant text response whose compact JSON is
-schema-valid and references only the compiled OCR line range.
+hash and exact TMA OCR digest must match the reference, its contract must match
+the report baseline contract, and its cache key is recomputed from those inputs.
+The reference OCR text and order must also reproduce the compiled user prompt.
+The report execution and prediction must identify the same successful call and
+`tma.json` result with a stopped, error-free provider response. Only the sibling
+`provider.raw.json` is read, and it must contain exactly one stopped Luna
+assistant text response, with no refusal or tool/function call, whose compact
+JSON is schema-valid and references only the compiled OCR line range.
 
 The importer writes prediction JSONL ordered by compiled example ID and an exact
 `<output>.sha256` sidecar. Both are private test evidence: keep them outside Git,

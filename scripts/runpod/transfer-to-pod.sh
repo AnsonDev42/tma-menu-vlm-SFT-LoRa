@@ -22,13 +22,8 @@ local_luna_sidecar="$(cd "$(dirname "$5")" && pwd)/$(basename "$5")"
 archive_name="$(basename "$local_archive")"
 luna_baseline_name="$(basename "$local_luna")"
 luna_baseline_sidecar_name="$(basename "$local_luna_sidecar")"
-validate_archive_name "$archive_name"
-validate_archive_name "$luna_baseline_name"
-validate_archive_name "$luna_baseline_sidecar_name"
-[[ "$archive_name" != "$luna_baseline_name" && \
-  "$archive_name" != "$luna_baseline_sidecar_name" && \
-  "$luna_baseline_name" != "$luna_baseline_sidecar_name" ]] || \
-  runpod_die "Transferred dataset and Luna file names must be distinct"
+validate_training_transfer_names \
+  "$archive_name" "$luna_baseline_name" "$luna_baseline_sidecar_name"
 if [[ ! -f "$local_archive" || ! -f "$local_archive.sha256" ]]; then
   runpod_die "dataset archive and .sha256 sidecar must both exist"
 fi

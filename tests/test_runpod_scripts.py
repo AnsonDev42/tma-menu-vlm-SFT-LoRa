@@ -711,10 +711,66 @@ def test_run_training_forwards_required_luna_files_to_remote_job(tmp_path: Path)
 def test_on_pod_script_always_verifies_evaluates_and_bundles_luna_baseline() -> None:
     script = (RUNPOD / "on-pod-train.sh").read_text(encoding="utf-8")
 
-    assert script.count("verify-sidecar") == 2
-    assert '--luna-predictions "$run/$luna_baseline_name"' in script
-    assert '"luna_test_predictions":luna_baseline_name' in script
+    assert script.count("verify-sidecar") == 3
+    assert 'luna_run="$run/luna-test-predictions.jsonl"' in script
+    assert '--luna-predictions "$luna_run"' in script
+    assert '"luna_test_predictions":"luna-test-predictions.jsonl"' in script
     assert "LUNA_TEST_PREDICTIONS" not in script
+
+
+@pytest.mark.parametrize(
+    ("archive", "baseline", "sidecar"),
+    [
+        (
+            "dataset.tar.gz",
+            "caller-controlled.jsonl",
+            "caller-controlled.jsonl.sha256",
+        ),
+        (
+            "luna-test-predictions.jsonl",
+            "luna-test-predictions.jsonl",
+            "luna-test-predictions.jsonl.sha256",
+        ),
+        (
+            "luna-test-predictions.jsonl.sha256",
+            "luna-test-predictions.jsonl",
+            "luna-test-predictions.jsonl.sha256",
+        ),
+    ],
+)
+def test_training_rejects_caller_controlled_or_colliding_luna_names_before_remote_action(
+    tmp_path: Path, archive: str, baseline: str, sidecar: str
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    invocation_log = tmp_path / "invocations"
+    _write_executable(
+        fake_bin / "runpodctl",
+        '#!/usr/bin/env bash\necho "$*" >> "$FAKE_INVOCATION_LOG"\nexit 99\n',
+    )
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text("{}\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "FAKE_INVOCATION_LOG": str(invocation_log),
+    }
+
+    result = _run(
+        "bash",
+        str(RUNPOD / "run-training.sh"),
+        "pod123",
+        "/workspace/synthetic-run",
+        archive,
+        baseline,
+        sidecar,
+        str(receipt),
+        env=env,
+    )
+
+    assert result.returncode == 2
+    assert "reserved" in result.stderr
+    assert not invocation_log.exists()
 
 
 def _write_executable(path: Path, text: str) -> None:

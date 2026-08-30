@@ -26,6 +26,20 @@ validate_archive_name() {
     runpod_die "ARCHIVE_NAME must be a safe basename"
 }
 
+validate_training_transfer_names() {
+  local archive_name="$1"
+  local luna_name="$2"
+  local luna_sidecar_name="$3"
+  validate_archive_name "$archive_name"
+  validate_archive_name "$luna_name"
+  validate_archive_name "$luna_sidecar_name"
+  [[ "$luna_name" == "luna-test-predictions.jsonl" && \
+    "$luna_sidecar_name" == "luna-test-predictions.jsonl.sha256" ]] || \
+    runpod_die "Luna baseline files must use the reserved training artifact names"
+  [[ "$archive_name" != "$luna_name" && "$archive_name" != "$luna_sidecar_name" ]] || \
+    runpod_die "Dataset archive name collides with a reserved Luna artifact name"
+}
+
 validate_delete_retry_config() {
   local initial="${RUNPOD_DELETE_INITIAL_BACKOFF_SECONDS:-1}"
   local maximum="${RUNPOD_DELETE_MAX_BACKOFF_SECONDS:-30}"

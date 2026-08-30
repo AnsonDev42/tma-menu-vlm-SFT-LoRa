@@ -15,13 +15,8 @@ luna_baseline_sidecar_name="$5"
 guard_receipt="$6"
 validate_pod_id "$pod_id"
 validate_remote_root "$remote_root"
-validate_archive_name "$archive_name"
-validate_archive_name "$luna_baseline_name"
-validate_archive_name "$luna_baseline_sidecar_name"
-[[ "$archive_name" != "$luna_baseline_name" && \
-  "$archive_name" != "$luna_baseline_sidecar_name" && \
-  "$luna_baseline_name" != "$luna_baseline_sidecar_name" ]] || \
-  runpod_die "Dataset and Luna file names must be distinct"
+validate_training_transfer_names \
+  "$archive_name" "$luna_baseline_name" "$luna_baseline_sidecar_name"
 [[ -f "$guard_receipt" ]] || runpod_die "GUARD_RECEIPT must exist"
 remaining_json="$(python3 "$script_dir/cost_guard.py" remaining \
   --receipt "$guard_receipt" --pod-id "$pod_id")"

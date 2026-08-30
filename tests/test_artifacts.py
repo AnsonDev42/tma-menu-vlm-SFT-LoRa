@@ -6,19 +6,25 @@ from pathlib import Path
 import pytest
 
 from menu_vlm.artifacts import (
+    PRIVATE_LUNA_EVIDENCE_ROLES,
     REQUIRED_ARTIFACT_ROLES,
     create_artifact_bundle,
     package_directory,
     verify_archive,
 )
 from menu_vlm.compiler import CompileOptions, compile_release
-from menu_vlm.jsonio import sha256_file, sha256_json
-from menu_vlm.luna_baseline import import_luna_baseline
+from menu_vlm.jsonio import sha256_file, sha256_json, write_sha256_sidecar
+from menu_vlm.luna_baseline import (
+    LUNA_TRUST_ROOT_NAME,
+    LUNA_TRUST_ROOT_SIDECAR_NAME,
+    create_luna_trust_root,
+    import_luna_baseline,
+)
 from menu_vlm.synthetic import create_synthetic_luna_evaluation, create_synthetic_release
 
 
 @lru_cache(maxsize=1)
-def _synthetic_evidence() -> tuple[bytes, bytes, bytes]:
+def _synthetic_evidence() -> tuple[bytes, bytes, bytes, bytes, bytes, bytes]:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary).resolve()
         release = root / "release"
@@ -36,14 +42,28 @@ def _synthetic_evidence() -> tuple[bytes, bytes, bytes]:
             tma / "luna-response-provenance.json.sha256",
             luna,
         )
+        trust_root = root / LUNA_TRUST_ROOT_NAME
+        create_luna_trust_root(
+            dataset,
+            tma,
+            str(summary["evaluation_run"]),
+            luna,
+            sha256_file(luna),
+            trust_root,
+        )
         return (
             (dataset / "manifest.json").read_bytes(),
             (tma / "luna-response-provenance.json").read_bytes(),
+            (tma / "luna-response-provenance.json.sha256").read_bytes(),
             luna.read_bytes(),
+            trust_root.read_bytes(),
+            (root / LUNA_TRUST_ROOT_SIDECAR_NAME).read_bytes(),
         )
 
 
-def _artifact_run(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
+def _artifact_run(
+    tmp_path: Path, *, private_trust: bool = False
+) -> tuple[Path, Path, dict[str, str]]:
     run = tmp_path / "run"
     run.mkdir()
     roles = {}
@@ -51,7 +71,14 @@ def _artifact_run(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
         path = run / f"{role}.txt"
         path.write_text(f"synthetic {role}\n", encoding="utf-8")
         roles[role] = path.name
-    dataset_manifest_bytes, response_provenance_bytes, luna_prediction_bytes = (
+    (
+        dataset_manifest_bytes,
+        response_provenance_bytes,
+        response_provenance_sidecar_bytes,
+        luna_prediction_bytes,
+        trust_root_bytes,
+        trust_root_sidecar_bytes,
+    ) = (
         _synthetic_evidence()
     )
     (run / roles["dataset_manifest"]).write_bytes(dataset_manifest_bytes)
@@ -61,6 +88,16 @@ def _artifact_run(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
     (run / roles["luna_response_provenance"]).unlink()
     provenance_path.write_bytes(response_provenance_bytes)
     roles["luna_response_provenance"] = provenance_path.name
+    if private_trust:
+        provenance_sidecar = run / "luna-response-provenance.json.sha256"
+        provenance_sidecar.write_bytes(response_provenance_sidecar_bytes)
+        roles["luna_response_provenance_sidecar"] = provenance_sidecar.name
+        trust_root = run / LUNA_TRUST_ROOT_NAME
+        trust_root.write_bytes(trust_root_bytes)
+        trust_root_sidecar = run / LUNA_TRUST_ROOT_SIDECAR_NAME
+        trust_root_sidecar.write_bytes(trust_root_sidecar_bytes)
+        roles["luna_trust_root"] = trust_root.name
+        roles["luna_trust_root_sidecar"] = trust_root_sidecar.name
     dataset_manifest = json.loads(dataset_manifest_bytes)
     test_reference_sha256 = dataset_manifest["files_sha256"]["test.jsonl"]
     dataset_sha256 = dataset_manifest["dataset_sha256"]
@@ -139,6 +176,53 @@ def test_artifact_bundle_and_transfer_archive_round_trip(tmp_path: Path) -> None
     assert report["valid"] is True
     assert (restored / "artifact-manifest.json").is_file()
     assert not (restored / "TRANSFER-MANIFEST.json").exists()
+
+
+def test_private_artifact_bundle_binds_luna_trust_root(tmp_path: Path) -> None:
+    run, spec, _roles = _artifact_run(tmp_path, private_trust=True)
+    manifest = create_artifact_bundle(run, spec, tmp_path / "bundle")
+
+    assert set(manifest["files"]) == set(REQUIRED_ARTIFACT_ROLES) | set(
+        PRIVATE_LUNA_EVIDENCE_ROLES
+    )
+
+
+@pytest.mark.parametrize(
+    "role",
+    [
+        "luna_response_provenance_sidecar",
+        "luna_trust_root",
+        "luna_trust_root_sidecar",
+    ],
+)
+def test_private_artifact_bundle_rejects_private_evidence_mutation(
+    tmp_path: Path, role: str
+) -> None:
+    run, spec, roles = _artifact_run(tmp_path, private_trust=True)
+    (run / roles[role]).write_text("mutated\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"private Luna evidence|checksum"):
+        create_artifact_bundle(run, spec, tmp_path / "bundle")
+
+
+def test_private_artifact_bundle_rejects_provenance_record_identity_mutation(
+    tmp_path: Path,
+) -> None:
+    run, spec, roles = _artifact_run(tmp_path, private_trust=True)
+    provenance_path = run / roles["luna_response_provenance"]
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    provenance["documents"][0]["provider_response_sha256"] = "f" * 64
+    provenance_path.write_text(
+        json.dumps(provenance, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    write_sha256_sidecar(
+        provenance_path, run / roles["luna_response_provenance_sidecar"]
+    )
+
+    with pytest.raises(ValueError, match="response provenance"):
+        create_artifact_bundle(run, spec, tmp_path / "bundle")
+    assert not (tmp_path / "bundle").exists()
 
 
 def test_artifact_bundle_rejects_missing_contract_role(tmp_path: Path) -> None:

@@ -13,10 +13,23 @@ from .constants import (
     RELEASE_FORMAT,
     SPLITS,
 )
-from .jsonio import read_json, safe_relative, sha256_file, sha256_json, write_json
+from .jsonio import (
+    canonical_json,
+    read_json,
+    safe_relative,
+    sha256_file,
+    sha256_json,
+    verify_sha256_sidecar,
+    write_json,
+)
 from .luna_baseline import (
     LUNA_RESPONSE_PROVENANCE_NAME,
+    LUNA_RESPONSE_PROVENANCE_SIDECAR_NAME,
+    LUNA_TRUST_ROOT_NAME,
+    LUNA_TRUST_ROOT_SIDECAR_NAME,
     approved_response_provenance_sha256,
+    validate_luna_response_provenance,
+    validate_luna_trust_root,
 )
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -64,15 +77,32 @@ REQUIRED_ARTIFACT_ROLES = frozenset(
         "commands",
     }
 )
+PRIVATE_LUNA_TRUST_ROOT_ROLES = frozenset(
+    {"luna_trust_root", "luna_trust_root_sidecar"}
+)
+PRIVATE_LUNA_PROVENANCE_ROLES = frozenset({"luna_response_provenance_sidecar"})
+PRIVATE_LUNA_EVIDENCE_ROLES = (
+    PRIVATE_LUNA_TRUST_ROOT_ROLES | PRIVATE_LUNA_PROVENANCE_ROLES
+)
 
 
 def create_artifact_bundle(run_root: Path, spec_path: Path, output: Path) -> dict[str, Any]:
     root = run_root.resolve()
     spec = read_json(spec_path)
     files = spec.get("files", {})
-    if not isinstance(files, dict) or set(files) != set(REQUIRED_ARTIFACT_ROLES):
-        missing = sorted(REQUIRED_ARTIFACT_ROLES - set(files))
-        extra = sorted(set(files) - REQUIRED_ARTIFACT_ROLES)
+    supplied_roles = set(files) if isinstance(files, dict) else set()
+    allowed_roles = set(REQUIRED_ARTIFACT_ROLES) | set(PRIVATE_LUNA_EVIDENCE_ROLES)
+    private_roles = supplied_roles & set(PRIVATE_LUNA_EVIDENCE_ROLES)
+    if (
+        not isinstance(files, dict)
+        or not set(REQUIRED_ARTIFACT_ROLES).issubset(supplied_roles)
+        or not supplied_roles.issubset(allowed_roles)
+        or private_roles not in (set(), set(PRIVATE_LUNA_EVIDENCE_ROLES))
+    ):
+        missing = sorted(set(REQUIRED_ARTIFACT_ROLES) - supplied_roles)
+        if private_roles:
+            missing.extend(sorted(set(PRIVATE_LUNA_EVIDENCE_ROLES) - private_roles))
+        extra = sorted(supplied_roles - allowed_roles)
         raise ValueError(f"Artifact roles do not match contract; missing={missing}, extra={extra}")
     required_metadata = {
         "schema_version",
@@ -109,6 +139,20 @@ def create_artifact_bundle(run_root: Path, spec_path: Path, output: Path) -> dic
             copied_sources.add(source)
             if role == "luna_response_provenance" and source.name != LUNA_RESPONSE_PROVENANCE_NAME:
                 raise ValueError("Luna response provenance role must use its reserved filename")
+            if (
+                role == "luna_response_provenance_sidecar"
+                and source.name != LUNA_RESPONSE_PROVENANCE_SIDECAR_NAME
+            ):
+                raise ValueError(
+                    "Luna response provenance sidecar role must use its reserved filename"
+                )
+            if role == "luna_trust_root" and source.name != LUNA_TRUST_ROOT_NAME:
+                raise ValueError("Luna trust root role must use its reserved filename")
+            if (
+                role == "luna_trust_root_sidecar"
+                and source.name != LUNA_TRUST_ROOT_SIDECAR_NAME
+            ):
+                raise ValueError("Luna trust root sidecar role must use its reserved filename")
             bundled_relative = f"files/{role}/{source.name}"
             target = destination / bundled_relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -203,8 +247,10 @@ def _validate_test_gate(
         or files_sha256.get("test.jsonl") != gate.get("reference_sha256")
     ):
         raise ValueError("Artifact dataset manifest does not match the completed test gate")
+    has_private_trust_root = PRIVATE_LUNA_EVIDENCE_ROLES.issubset(manifest_files)
     if (
-        manifest_files["luna_response_provenance"]["sha256"]
+        not has_private_trust_root
+        and manifest_files["luna_response_provenance"]["sha256"]
         != approved_response_provenance_sha256(dataset_manifest)
     ):
         raise ValueError("Artifact Luna response provenance does not match the approved anchor")
@@ -217,6 +263,48 @@ def _validate_test_gate(
         != manifest_files["luna_test_predictions"]["sha256"]
     ):
         raise ValueError("Artifact Luna response provenance does not match the dataset identity")
+    if has_private_trust_root:
+        bundle_root = gate_path.parent.parent.parent
+        provenance_sidecar = (
+            bundle_root
+            / manifest_files["luna_response_provenance_sidecar"]["path"]
+        )
+        trust_path = bundle_root / manifest_files["luna_trust_root"]["path"]
+        trust_sidecar = bundle_root / manifest_files["luna_trust_root_sidecar"]["path"]
+        try:
+            provenance_check = verify_sha256_sidecar(
+                bundle_root / provenance_path, provenance_sidecar
+            )
+            if (bundle_root / provenance_path).read_bytes() != (
+                canonical_json(provenance) + "\n"
+            ).encode("utf-8"):
+                raise ValueError("Luna response provenance is not canonical exact JSON")
+            verify_sha256_sidecar(trust_path, trust_sidecar)
+            trust_value = read_json(trust_path)
+            if trust_path.read_bytes() != (canonical_json(trust_value) + "\n").encode("utf-8"):
+                raise ValueError("Luna trust root is not canonical exact JSON")
+            validate_luna_trust_root(
+                trust_value,
+                dataset_manifest,
+                manifest_files["dataset_manifest"]["sha256"],
+                str(provenance.get("evaluation_run")),
+                manifest_files["luna_test_predictions"]["sha256"],
+            )
+            if (
+                trust_value["response_provenance_sha256"]
+                != provenance_check["sha256"]
+            ):
+                raise ValueError(
+                    "Luna response provenance does not match the private trust root"
+                )
+            validate_luna_response_provenance(
+                provenance,
+                dataset_manifest,
+                str(trust_value["evaluation_run"]),
+                str(trust_value["baseline_prediction_sha256"]),
+            )
+        except ValueError as exc:
+            raise ValueError(f"Artifact private Luna evidence verification failed: {exc}") from exc
 
 
 def _validate_compiled_dataset_manifest(value: Any) -> None:

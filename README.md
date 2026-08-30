@@ -122,5 +122,11 @@ detached training, monitoring, retrieval, verification, cleanup, and the hard
 `$15` ceiling. Scripts require explicit paths and obtain secrets only from the
 environment or existing CLI configuration.
 
+For a step-by-step repeat run with a new private release such as v9, use
+[docs/rerun-private-training.md](docs/rerun-private-training.md). It covers
+immutable-release validation, a fresh Luna baseline, bounded Runpod execution,
+validation-only iteration, the one-shot primary-test gate, returned-adapter
+reconstruction, and secure cleanup.
+
 The adapter-only return contract is in [docs/artifact-bundle.md](docs/artifact-bundle.md).
 The base model is never merged into the bundle.

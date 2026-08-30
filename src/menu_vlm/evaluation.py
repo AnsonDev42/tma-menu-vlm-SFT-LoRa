@@ -141,7 +141,7 @@ def evaluate_test_once(
     dataset_sha256: str,
     checkpoint: Path,
     gate_store: Path,
-    luna_predictions: Path | None = None,
+    luna_predictions: Path,
 ) -> dict[str, Any]:
     if len(dataset_sha256) != 64 or any(
         character not in "0123456789abcdef" for character in dataset_sha256
@@ -167,9 +167,7 @@ def evaluate_test_once(
         "identity_sha256": identity_sha256,
         "reference_sha256": sha256_file(references),
         "prediction_sha256": sha256_file(predictions),
-        "luna_prediction_sha256": (
-            sha256_file(luna_predictions) if luna_predictions is not None else None
-        ),
+        "luna_prediction_sha256": sha256_file(luna_predictions),
         "status": "reserved",
     }
     try:

@@ -55,6 +55,8 @@ throughput, and peak memory. Note order is irrelevant; missing notes, wrong text
 or attaching a note to the wrong matched owner reduces structural F1. Robustness
 uses the same metrics on its separate split. Pass saved
 Luna predictions with `--luna-predictions` for an identical baseline report.
+For the primary frozen test this argument is mandatory; the Runpod workflow never
+falls back to a test report without the saved baseline.
 
 ## Consume frozen test once
 
@@ -67,6 +69,7 @@ uv run menu-vlm evaluate-test \
   --dataset-sha256 DATASET_SHA256 \
   --checkpoint /workspace/run/selected-adapter \
   --gate-store /workspace/tma-menu-vlm/frozen-test-gates \
+  --luna-predictions /workspace/run/luna-test-predictions.jsonl \
   --output /workspace/run/test.metrics.json
 ```
 
@@ -74,8 +77,10 @@ The fixed gate store is outside the training/evaluation output tree and writes o
 gate keyed by dataset SHA-256, pinned model ID and
 revision, and the hashes of the selected adapter config/weights. Replaying the
 same identity with a different metrics output path or predictions file still
-fails. A different adapter content hash creates a different identity. Use
-validation—not frozen test—for iteration.
+fails. The gate also records the required Luna prediction SHA-256, while keeping
+the one-shot identity bound to the candidate adapter rather than offering a new
+test attempt when a baseline file changes. A different adapter content hash
+creates a different identity. Use validation—not frozen test—for iteration.
 
 Mac inference is optional. The authoritative run is on the Runpod environment;
 the 16 GB Mac path is limited to build/validation/preflight unless a compatible

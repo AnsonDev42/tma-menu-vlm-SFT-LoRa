@@ -69,3 +69,21 @@ one terminal LF: 4,284 UTF-8 bytes with SHA-256
 `manifest.json` records the source release hash, split assignments, prompt hash,
 counts, every generated file SHA-256, and an aggregate dataset SHA-256. Repeated
 compiles are byte-identical.
+
+## Imported current-Luna test baseline
+
+`menu-vlm import-luna-baseline` takes the compiled dataset, an explicit TMA data
+root, and a completed evaluation run ID. It requires the run/report model to be
+`current-tma-core:gpt-5.6-luna`, exact completed document/reference/prediction
+accounting, and a one-to-one image SHA-256 match with compiled `test.jsonl`.
+
+For every matched page, `_evaluation.call_path` must be exactly
+`baselines/tma-core/<cache-sha256>/call.json`; absolute paths, traversal, symlink
+escapes, cache-key mismatches, or another subtree fail. The call's input image
+hash must match the reference. Only the sibling `provider.raw.json` is read, and
+it must contain exactly one Luna assistant text response whose compact JSON is
+schema-valid and references only the compiled OCR line range.
+
+The importer writes prediction JSONL ordered by compiled example ID and an exact
+`<output>.sha256` sidecar. Both are private test evidence: keep them outside Git,
+transfer them directly to the pod, and return the JSONL in the adapter bundle.

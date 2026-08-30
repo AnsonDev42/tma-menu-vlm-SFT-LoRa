@@ -15,14 +15,25 @@ uv run menu-vlm validate-dataset --dataset "$scratch/compiled-a"
 uv run menu-vlm preflight --config configs/qwen3-vl-4b-lora.json \
   --dataset "$scratch/compiled-a" --no-download
 
+uv run menu-vlm synthetic-luna-evaluation --dataset "$scratch/compiled-a" \
+  --output "$scratch/tma-data"
+uv run menu-vlm import-luna-baseline --dataset "$scratch/compiled-a" \
+  --tma-data-root "$scratch/tma-data" --evaluation-run public-synthetic-luna \
+  --output "$scratch/luna-test-predictions.jsonl"
+uv run menu-vlm verify-sidecar --file "$scratch/luna-test-predictions.jsonl" \
+  --sidecar "$scratch/luna-test-predictions.jsonl.sha256"
+
 uv run menu-vlm synthetic-predictions --references "$scratch/compiled-a/test.jsonl" \
   --output "$scratch/reordered-predictions.jsonl"
 uv run menu-vlm evaluate --references "$scratch/compiled-a/test.jsonl" \
-  --predictions "$scratch/reordered-predictions.jsonl" --output "$scratch/reordered-metrics.json"
+  --predictions "$scratch/reordered-predictions.jsonl" \
+  --luna-predictions "$scratch/luna-test-predictions.jsonl" \
+  --output "$scratch/reordered-metrics.json"
 python3 - "$scratch/reordered-metrics.json" <<'PY'
 import json, sys
 metrics=json.load(open(sys.argv[1], encoding="utf-8"))
 assert metrics["schema_valid_rate"] == metrics["structural_f1"] == 1.0, metrics
+assert metrics["luna_baseline"]["schema_valid_rate"] == 1.0, metrics
 PY
 
 uv run menu-vlm synthetic-artifact-run --dataset-manifest "$scratch/compiled-a/manifest.json" \

@@ -4,8 +4,17 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import REQUIRED_ARTIFACT_ROLES
+from .compiler import validate_compiled_dataset
 from .constants import MODEL_ID, MODEL_REVISION, RELEASE_FORMAT, SPLITS
-from .jsonio import read_json, read_jsonl, sha256_file, write_json, write_jsonl
+from .jsonio import (
+    canonical_json,
+    read_json,
+    read_jsonl,
+    sha256_file,
+    sha256_json,
+    write_json,
+    write_jsonl,
+)
 
 
 def create_synthetic_release(output: Path, *, include_splits: bool = True) -> dict[str, Any]:
@@ -182,6 +191,83 @@ def create_synthetic_artifact_run(output: Path, *, dataset_manifest_path: Path) 
     }
     write_json(root / "artifact-spec.json", spec)
     return {"run_root": str(root), "spec": str(root / "artifact-spec.json")}
+
+
+def create_synthetic_luna_evaluation(dataset: Path, output: Path) -> dict[str, Any]:
+    """Create public synthetic current-TMA cache evidence for importer smoke tests."""
+    validate_compiled_dataset(dataset)
+    dataset_root = dataset.resolve()
+    manifest = read_json(dataset_root / "manifest.json")
+    if manifest.get("source_release_version") != "synthetic-v1":
+        raise ValueError("Synthetic Luna evidence requires the public synthetic dataset")
+    root = output.resolve()
+    if root.exists() and any(root.iterdir()):
+        raise FileExistsError(f"Synthetic TMA data output is not empty: {root}")
+    root.mkdir(parents=True, exist_ok=True)
+    run_id = "public-synthetic-luna"
+    evaluation = root / "evaluation" / run_id
+    documents = []
+    try:
+        for index, row in enumerate(read_jsonl(dataset_root / "test.jsonl"), 1):
+            document_id = f"synthetic-tma-{index:04d}"
+            image_sha256 = sha256_file(dataset_root / row["image"])
+            cache_key = sha256_json(
+                {"fixture": "public-synthetic", "document_id": document_id}
+            )
+            call_path = f"baselines/tma-core/{cache_key}/call.json"
+            write_json(
+                evaluation / "references" / f"{document_id}.json",
+                {"document_id": document_id, "image": {"sha256": image_sha256}},
+            )
+            write_json(
+                evaluation / "predictions" / f"{document_id}.json",
+                {
+                    "_evaluation": {
+                        "state": "succeeded",
+                        "cache_key": cache_key,
+                        "call_path": call_path,
+                    }
+                },
+            )
+            write_json(
+                root / call_path,
+                {"state": "succeeded", "inputs": {"image_sha256": image_sha256}},
+            )
+            write_json(
+                root / "baselines" / "tma-core" / cache_key / "provider.raw.json",
+                {
+                    "model": "gpt-5.6-luna",
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": canonical_json(row["target"]),
+                            }
+                        }
+                    ],
+                },
+            )
+            documents.append({"document_id": document_id})
+        metadata = {
+            "run_id": run_id,
+            "status": "complete",
+            "model": "current-tma-core:gpt-5.6-luna",
+            "document_count": len(documents),
+        }
+        write_json(
+            evaluation / "report.json",
+            {
+                **metadata,
+                "completed_document_count": len(documents),
+                "baseline": {"contract": {"model": "gpt-5.6-luna"}},
+                "documents": documents,
+            },
+        )
+        write_json(evaluation / "run.json", metadata)
+        return {"output": str(root), "evaluation_run": run_id, "documents": len(documents)}
+    except Exception:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
 
 
 def _record(

@@ -4,27 +4,43 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/lib.sh"
 
-if [[ $# -ne 2 ]]; then
-  runpod_die "usage: $0 REMOTE_ROOT ARCHIVE_NAME"
+if [[ $# -ne 4 ]]; then
+  runpod_die "usage: $0 REMOTE_ROOT ARCHIVE_NAME LUNA_BASELINE_NAME LUNA_BASELINE_SHA256_NAME"
 fi
 remote_root="$1"
 archive_name="$2"
+luna_baseline_name="$3"
+luna_baseline_sidecar_name="$4"
 validate_remote_root "$remote_root"
 validate_archive_name "$archive_name"
+validate_archive_name "$luna_baseline_name"
+validate_archive_name "$luna_baseline_sidecar_name"
+[[ "$archive_name" != "$luna_baseline_name" && \
+  "$archive_name" != "$luna_baseline_sidecar_name" && \
+  "$luna_baseline_name" != "$luna_baseline_sidecar_name" ]] || \
+  runpod_die "Dataset and Luna file names must be distinct"
 project="$remote_root/project"
 archive="$remote_root/incoming/$archive_name"
 dataset="$remote_root/private-dataset"
 run="$remote_root/run"
 config="$project/configs/qwen3-vl-4b-lora.json"
+luna_incoming="$remote_root/incoming/$luna_baseline_name"
+luna_sidecar_incoming="$remote_root/incoming/$luna_baseline_sidecar_name"
 
 export HF_HOME="$remote_root/hf-cache"
 python3 -m pip install --break-system-packages "uv==0.12.6"
 cd "$project"
 uv sync --extra train --frozen
+uv run menu-vlm verify-sidecar --file "$luna_incoming" \
+  --sidecar "$luna_sidecar_incoming"
 uv run menu-vlm verify-archive --archive "$archive" --output "$dataset"
 uv run menu-vlm validate-dataset --dataset "$dataset"
 uv run menu-vlm preflight --config "$config" --dataset "$dataset"
 mkdir -p "$run/evaluations" "$run/repro"
+cp "$luna_incoming" "$run/$luna_baseline_name"
+cp "$luna_sidecar_incoming" "$run/$luna_baseline_sidecar_name"
+uv run menu-vlm verify-sidecar --file "$run/$luna_baseline_name" \
+  --sidecar "$run/$luna_baseline_sidecar_name"
 nvidia-smi -q > "$run/hardware.txt"
 printf '%q ' "$0" "$@" > "$run/commands.txt"
 printf '\n' >> "$run/commands.txt"
@@ -94,10 +110,8 @@ dataset_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["
 gate_store="$remote_root/frozen-test-gates"
 test_args=(evaluate-test --references "$dataset/test.jsonl" --predictions "$run/test.predictions.jsonl"
   --output "$run/test.metrics.json" --dataset-sha256 "$dataset_sha"
-  --checkpoint "$run/selected-adapter" --gate-store "$gate_store")
-if [[ -n "${LUNA_TEST_PREDICTIONS:-}" ]]; then
-  test_args+=(--luna-predictions "$LUNA_TEST_PREDICTIONS")
-fi
+  --checkpoint "$run/selected-adapter" --gate-store "$gate_store"
+  --luna-predictions "$run/$luna_baseline_name")
 uv run menu-vlm "${test_args[@]}"
 test_gate="$(find "$gate_store" -maxdepth 1 -type f -name '*.json' -print)"
 [[ -f "$test_gate" && "$(find "$gate_store" -maxdepth 1 -type f -name '*.json' | wc -l)" -eq 1 ]] || \
@@ -115,9 +129,10 @@ cp "$config" "$run/repro/training-config.json"
 cp "$dataset/manifest.json" "$run/repro/dataset-manifest.json"
 cp "$run/training/training-report.json" "$run/repro/processor-provenance.json"
 cp "$remote_root/train.log" "$run/training.log"
-python3 - "$run" <<'PY'
+python3 - "$run" "$luna_baseline_name" <<'PY'
 import json, pathlib, sys
 run=pathlib.Path(sys.argv[1])
+luna_baseline_name=sys.argv[2]
 spec={"schema_version":"1.0","model_id":"Qwen/Qwen3-VL-4B-Instruct",
 "model_revision":"ebb281ec70b05090aa6165b016eac8ec08e71b17",
 "dataset_sha256":json.load(open(run/"repro/dataset-manifest.json"))["dataset_sha256"],
@@ -132,6 +147,7 @@ spec={"schema_version":"1.0","model_id":"Qwen/Qwen3-VL-4B-Instruct",
 "selected_validation_metrics":"evaluations/selected.validation.metrics.json",
 "robustness_validation_predictions":"evaluations/robustness-validation.predictions.jsonl",
 "robustness_validation_metrics":"evaluations/robustness-validation.metrics.json",
+"luna_test_predictions":luna_baseline_name,
 "test_predictions":"test.predictions.jsonl","test_metrics":"test.metrics.json",
 "robustness_test_predictions":"evaluations/robustness-test.predictions.jsonl",
 "robustness_test_metrics":"evaluations/robustness-test.metrics.json",

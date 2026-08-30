@@ -18,6 +18,7 @@ def test_artifact_bundle_and_transfer_archive_round_trip(tmp_path: Path) -> None
         "selected_validation_metrics",
         "robustness_validation_predictions",
         "robustness_validation_metrics",
+        "luna_test_predictions",
         "test_predictions",
         "test_metrics",
         "robustness_test_predictions",

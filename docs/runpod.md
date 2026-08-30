@@ -51,9 +51,20 @@ runpodctl ssh list-keys
 
 uv run menu-vlm package --source /absolute/private/compiled \
   --archive /absolute/private/compiled.tar.gz
+
+uv run menu-vlm import-luna-baseline \
+  --dataset /absolute/private/compiled \
+  --tma-data-root /absolute/private/tma-menu-parser-data \
+  --evaluation-run COMPLETED_CURRENT_LUNA_RUN \
+  --output /absolute/private/luna-test-predictions.jsonl
 ```
 
-The package command writes `compiled.tar.gz.sha256`. Keep both files.
+The package command writes `compiled.tar.gz.sha256`; the importer writes
+`luna-test-predictions.jsonl.sha256`. Keep all four private files. The importer
+requires a complete `current-tma-core:gpt-5.6-luna` run, matches its evaluation
+references to compiled test images by SHA-256, resolves provider responses only
+through validated call paths under the explicit TMA data root, and rejects any
+missing, duplicate, extra, malformed, or mismatched identity.
 
 ## 2. Launch with a bounded local deletion guard
 
@@ -75,18 +86,23 @@ command if SSH is not ready yet.
 
 ```bash
 scripts/runpod/transfer-to-pod.sh POD_ID "$PWD" \
-  /absolute/private/compiled.tar.gz /workspace/tma-menu-vlm
+  /absolute/private/compiled.tar.gz \
+  /absolute/private/luna-test-predictions.jsonl \
+  /absolute/private/luna-test-predictions.jsonl.sha256 \
+  /workspace/tma-menu-vlm
 ```
 
 This rsyncs public code without `.git`, `.venv`, or `.env`, and transfers the
-private archive plus sidecar directly over SSH. No image or record enters Git or
-a public artifact store.
+private archive, Luna prediction JSONL, and both sidecars directly over SSH. It
+validates the Luna checksum before any remote action. No image, record, or Luna
+prediction enters Git or a public artifact store.
 
 ## 4. Run detached and monitor
 
 ```bash
 scripts/runpod/run-training.sh POD_ID /workspace/tma-menu-vlm \
-  compiled.tar.gz /absolute/local/path/to/POD_ID.json
+  compiled.tar.gz luna-test-predictions.jsonl \
+  luna-test-predictions.jsonl.sha256 /absolute/local/path/to/POD_ID.json
 
 runpodctl pod logs POD_ID --follow
 # Or use `runpodctl ssh info POD_ID`, then tail:
@@ -97,8 +113,9 @@ The remote script verifies checksums before extraction, installs the frozen
 training environment, runs training, evaluates every validation checkpoint,
 selects by structural/item/loss policy, reruns canonical selected validation,
 evaluates validation/test robustness, consumes primary test once through its
-fixed identity gate, and creates a checksummed adapter bundle containing every
-prediction/metric stream. Success ends with
+fixed identity gate with the checksum-verified saved Luna baseline, and creates
+a checksummed adapter bundle containing every prediction/metric stream plus the
+exact Luna test predictions. Success ends with
 `TRAIN_EVAL_BUNDLE_DONE`; a merely running pod is not proof.
 
 ## 5. Retrieve and verify before deletion

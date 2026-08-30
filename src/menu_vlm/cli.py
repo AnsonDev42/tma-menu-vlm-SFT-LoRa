@@ -7,13 +7,15 @@ from .artifacts import create_artifact_bundle, package_directory, verify_archive
 from .compiler import CompileOptions, compile_release, validate_compiled_dataset
 from .constants import REPOSITORY_ROOT
 from .evaluation import evaluate_files, evaluate_test_once, select_checkpoint
-from .jsonio import canonical_json, write_json
+from .jsonio import canonical_json, verify_sha256_sidecar, write_json
+from .luna_baseline import import_luna_baseline
 from .prediction import predict_dataset
 from .privacy import scan_public_repository
 from .release import validate_release
 from .synthetic import (
     create_reordered_predictions,
     create_synthetic_artifact_run,
+    create_synthetic_luna_evaluation,
     create_synthetic_release,
 )
 from .training import preflight_config, run_training
@@ -40,6 +42,12 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "synthetic-artifact-run":
         return create_synthetic_artifact_run(
             args.output, dataset_manifest_path=args.dataset_manifest
+        )
+    if args.command == "synthetic-luna-evaluation":
+        return create_synthetic_luna_evaluation(args.dataset, args.output)
+    if args.command == "import-luna-baseline":
+        return import_luna_baseline(
+            args.dataset, args.tma_data_root, args.evaluation_run, args.output
         )
     if args.command == "validate-release":
         release = validate_release(args.release, allow_unsplit=args.allow_unsplit)
@@ -106,6 +114,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         return package_directory(args.source, args.archive)
     if args.command == "verify-archive":
         return verify_archive(args.archive, args.output)
+    if args.command == "verify-sidecar":
+        return verify_sha256_sidecar(args.file, args.sidecar)
     if args.command == "scan-public":
         return scan_public_repository(args.repository)
     raise AssertionError(f"Unhandled command: {args.command}")
@@ -126,6 +136,16 @@ def _parser() -> argparse.ArgumentParser:
     synthetic_artifacts = commands.add_parser("synthetic-artifact-run")
     synthetic_artifacts.add_argument("--dataset-manifest", type=Path, required=True)
     synthetic_artifacts.add_argument("--output", type=Path, required=True)
+
+    synthetic_luna = commands.add_parser("synthetic-luna-evaluation")
+    synthetic_luna.add_argument("--dataset", type=Path, required=True)
+    synthetic_luna.add_argument("--output", type=Path, required=True)
+
+    luna = commands.add_parser("import-luna-baseline")
+    luna.add_argument("--dataset", type=Path, required=True)
+    luna.add_argument("--tma-data-root", type=Path, required=True)
+    luna.add_argument("--evaluation-run", required=True)
+    luna.add_argument("--output", type=Path, required=True)
 
     validate_release_parser = commands.add_parser("validate-release")
     validate_release_parser.add_argument("--release", type=Path, required=True)
@@ -163,14 +183,14 @@ def _parser() -> argparse.ArgumentParser:
     predict.add_argument("--max-new-tokens", type=int, default=4096)
 
     evaluate = commands.add_parser("evaluate")
-    _evaluation_args(evaluate)
+    _evaluation_args(evaluate, require_luna=False)
 
     selection = commands.add_parser("select-checkpoint")
     selection.add_argument("--metrics", type=Path, required=True)
     selection.add_argument("--output", type=Path, required=True)
 
     test = commands.add_parser("evaluate-test")
-    _evaluation_args(test)
+    _evaluation_args(test, require_luna=True)
     test.add_argument("--dataset-sha256", required=True)
     test.add_argument("--checkpoint", type=Path, required=True)
     test.add_argument("--gate-store", type=Path, required=True)
@@ -188,15 +208,19 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--archive", type=Path, required=True)
     verify.add_argument("--output", type=Path, required=True)
 
+    verify_sidecar = commands.add_parser("verify-sidecar")
+    verify_sidecar.add_argument("--file", type=Path, required=True)
+    verify_sidecar.add_argument("--sidecar", type=Path, required=True)
+
     scan = commands.add_parser("scan-public")
     scan.add_argument("--repository", type=Path, default=REPOSITORY_ROOT)
     return parser
 
 
-def _evaluation_args(parser: argparse.ArgumentParser) -> None:
+def _evaluation_args(parser: argparse.ArgumentParser, *, require_luna: bool) -> None:
     parser.add_argument("--references", type=Path, required=True)
     parser.add_argument("--predictions", type=Path, required=True)
-    parser.add_argument("--luna-predictions", type=Path)
+    parser.add_argument("--luna-predictions", type=Path, required=require_luna)
     parser.add_argument("--output", type=Path, required=True)
 
 

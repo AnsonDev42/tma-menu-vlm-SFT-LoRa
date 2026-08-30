@@ -15,9 +15,9 @@ validate_remote_root "$remote_root"
 local_output="$(mkdir -p "$3" && cd "$3" && pwd)"
 load_ssh_info "$pod_id"
 rsync_ssh="$(rsync_ssh_command)"
-rsync -az -e "$rsync_ssh" \
+rsync -az --no-owner --no-group -e "$rsync_ssh" \
   root@"$RUNPOD_SSH_IP":"$remote_root/artifact-bundle.tar.gz" "$local_output/"
-rsync -az -e "$rsync_ssh" \
+rsync -az --no-owner --no-group -e "$rsync_ssh" \
   root@"$RUNPOD_SSH_IP":"$remote_root/artifact-bundle.tar.gz.sha256" "$local_output/"
 archive="$local_output/artifact-bundle.tar.gz"
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

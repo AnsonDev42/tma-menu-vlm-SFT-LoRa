@@ -35,6 +35,7 @@ export HF_HOME="$remote_root/hf-cache"
 python3 -m pip install --break-system-packages "uv==0.12.6"
 cd "$project"
 uv sync --extra train --frozen
+uv run python scripts/check-training-imports.py
 uv run menu-vlm verify-sidecar --file "$luna_incoming" \
   --sidecar "$luna_sidecar_incoming"
 uv run menu-vlm verify-sidecar --file "$provenance_incoming" \

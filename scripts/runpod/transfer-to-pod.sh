@@ -45,12 +45,13 @@ ssh_args=(-i "$RUNPOD_SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-
 rsync_ssh="$(rsync_ssh_command)"
 ssh "${ssh_args[@]}" root@"$RUNPOD_SSH_IP" mkdir -p -- \
   "$remote_root/project" "$remote_root/incoming"
-rsync -az --delete --exclude .git --exclude .venv --exclude .env \
+rsync -az --no-owner --no-group --delete --exclude .git --exclude .venv --exclude .env \
   -e "$rsync_ssh" "$local_project/" root@"$RUNPOD_SSH_IP":"$remote_root/project/"
-rsync -az -e "$rsync_ssh" "$local_archive" "$local_archive.sha256" \
+rsync -az --no-owner --no-group -e "$rsync_ssh" "$local_archive" "$local_archive.sha256" \
   root@"$RUNPOD_SSH_IP":"$remote_root/incoming/"
-rsync -az -e "$rsync_ssh" "$local_luna" "$local_luna_sidecar" \
+rsync -az --no-owner --no-group -e "$rsync_ssh" "$local_luna" "$local_luna_sidecar" \
   root@"$RUNPOD_SSH_IP":"$remote_root/incoming/"
-rsync -az -e "$rsync_ssh" "$local_provenance" "$local_provenance_sidecar" \
+rsync -az --no-owner --no-group -e "$rsync_ssh" \
+  "$local_provenance" "$local_provenance_sidecar" \
   root@"$RUNPOD_SSH_IP":"$remote_root/incoming/"
 echo "Transfer complete: $remote_root" >&2

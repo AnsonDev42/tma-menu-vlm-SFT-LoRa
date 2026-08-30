@@ -106,7 +106,9 @@ scripts/runpod/transfer-to-pod.sh POD_ID "$PWD" \
   /workspace/tma-menu-vlm
 ```
 
-This rsyncs public code without `.git`, `.venv`, or `.env`, and transfers the
+This rsyncs public code without `.git`, `.venv`, or `.env`, disables local
+owner/group preservation for compatibility with root-squashed Runpod workspace
+volumes, and transfers the
 private archive, Luna prediction JSONL, approved response provenance, and their
 sidecars directly over SSH. It validates both Luna evidence checksums before any
 remote action. No image, record, or Luna
@@ -127,7 +129,8 @@ runpodctl pod logs POD_ID --follow
 ```
 
 The remote script verifies checksums before extraction, installs the frozen
-training environment, runs training, evaluates every validation checkpoint,
+training environment, checks the exact Torch/Torchvision and Qwen3-VL processor
+import seam without loading a model, runs training, evaluates every validation checkpoint,
 selects by structural/item/loss policy, reruns canonical selected validation,
 evaluates validation/test robustness, consumes primary test once through its
 fixed identity gate with the checksum-verified saved Luna baseline, and creates
@@ -151,7 +154,8 @@ scripts/runpod/retrieve.sh POD_ID /workspace/tma-menu-vlm \
   /absolute/private/local-results
 ```
 
-The script rsyncs archive and sidecar and runs the safe local verifier. Inspect
+The script rsyncs archive and sidecar without attempting to preserve remote
+owner/group IDs, then runs the safe local verifier. Inspect
 `artifact-bundle/artifact-manifest.json`, metrics, selection, and logs before
 cleanup.
 

@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import time
+import tomllib
 from decimal import Decimal
 from pathlib import Path
 
@@ -14,6 +15,27 @@ RUNPOD = ROOT / "scripts" / "runpod"
 
 def _run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, check=False, capture_output=True, text=True, env=env)
+
+
+def test_training_extra_pins_torchvision_compatible_with_pinned_torch() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    training = project["project"]["optional-dependencies"]["train"]
+
+    assert "torch==2.13.0" in training
+    assert "torchvision==0.28.0" in training
+
+
+def test_on_pod_bootstrap_checks_exact_qwen_processor_import_seam() -> None:
+    bootstrap = (RUNPOD / "on-pod-train.sh").read_text(encoding="utf-8")
+    smoke = (ROOT / "scripts" / "check-training-imports.py")
+
+    assert smoke.is_file()
+    assert "uv run python scripts/check-training-imports.py" in bootstrap
+    source = smoke.read_text(encoding="utf-8")
+    assert "Qwen3VLProcessor" in source
+    assert "Qwen3VLVideoProcessor" in source
+    assert '_require_version("torch", "2.13.0")' in source
+    assert '_require_version("torchvision", "0.28.0")' in source
 
 
 @pytest.mark.parametrize(
@@ -631,11 +653,22 @@ def test_transfer_requires_and_sends_checksummed_luna_evidence(tmp_path: Path) -
 
     assert result.returncode == 0, result.stderr
     invocations = invocation_log.read_text(encoding="utf-8")
+    rsync_invocations = [
+        line for line in invocations.splitlines() if line.startswith("rsync ")
+    ]
+    assert len(rsync_invocations) == 4
+    assert all("--no-owner --no-group" in line for line in rsync_invocations)
     assert str(baseline) in invocations
     assert str(sidecar) in invocations
     assert str(provenance) in invocations
     assert str(provenance_sidecar) in invocations
     assert "/workspace/synthetic-run/incoming/" in invocations
+
+
+def test_retrieval_disables_owner_and_group_preservation_for_every_rsync() -> None:
+    script = (RUNPOD / "retrieve.sh").read_text(encoding="utf-8")
+
+    assert script.count("rsync -az --no-owner --no-group") == 2
 
 
 @pytest.mark.parametrize("damaged", ["baseline", "provenance"])

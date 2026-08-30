@@ -102,6 +102,11 @@ uv run menu-vlm train --config configs/qwen3-vl-4b-lora.json \
   --dataset "$MENU_COMPILED_PATH" --output /workspace/tma-menu-vlm/run/training
 ```
 
+The frozen training extra pins the Torchvision backend required by Qwen3-VL's
+image/video processor alongside the pinned Torch runtime. Runpod bootstrap
+imports both Qwen3-VL processor classes before touching private training data or
+loading model weights.
+
 Executable prediction/evaluation commands are in
 [docs/training-and-evaluation.md](docs/training-and-evaluation.md). Selection is
 validation-only: structural F1 (including printed note text and ownership), item

@@ -1041,7 +1041,10 @@ def _validate_response_provenance(
     approved_baseline_sha256: str | None = None,
 ) -> None:
     synthetic = dataset_manifest.get("source_release_version") == "synthetic-v1"
-    expected_count = 1 if synthetic else 3
+    counts = dataset_manifest.get("counts")
+    expected_count = counts.get("test") if isinstance(counts, dict) else None
+    if not isinstance(expected_count, int) or expected_count < 1:
+        raise ValueError("Compiled dataset manifest has invalid frozen test accounting")
     if (
         set(value) != _PROVENANCE_KEYS
         or value.get("format") != "tma-luna-response-provenance-v1"

@@ -66,7 +66,13 @@ bitsandbytes CUDA backend (`load_in_8bit=True`); it cannot silently run on macOS
 `--batch-size` batches complete multimodal conversations and preserves input
 order and exact example count. Each row records image preprocessing, vision
 encoder, LLM prefill, time to first token, decode duration, generated-token
-count, decode throughput, total latency, and peak CUDA memory. Evaluation files
+count, decode-token count, decode throughput, total latency, and peak CUDA memory.
+Decode tokens deliberately exclude the first token attributed to TTFT; a
+one-token completion therefore has zero decode tokens and zero decode throughput.
+Per-example throughput uses that example's post-TTFT tokens, while batch
+throughput sums post-TTFT tokens across the batch and divides by the one shared
+decode interval. Aggregate telemetry counts shared phase timings once per batch.
+Evaluation files
 carry SHA-256 provenance for their exact references and predictions.
 
 Optional W&B logging requires `uv sync --extra train --extra telemetry`. Pass a

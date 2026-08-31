@@ -89,6 +89,52 @@ def test_evaluation_requires_exact_prediction_accounting(tmp_path: Path) -> None
         evaluate_files(references, predictions)
 
 
+def test_evaluation_aggregates_shared_phase_telemetry_once_per_batch(tmp_path: Path) -> None:
+    references = tmp_path / "references.jsonl"
+    predictions = tmp_path / "predictions.jsonl"
+    write_jsonl(
+        references,
+        [
+            {"example_id": name, "ocr_line_count": 6, "target": REFERENCE}
+            for name in ("a", "b", "c")
+        ],
+    )
+    write_jsonl(
+        predictions,
+        [
+            {
+                "example_id": "a",
+                "prediction": REFERENCE,
+                "inference_mode": "int8",
+                "batch_index": 0,
+                "preprocessing_seconds": 1.0,
+                "batch_decode_tokens_per_second": 12.0,
+            },
+            {
+                "example_id": "b",
+                "prediction": REFERENCE,
+                "inference_mode": "int8",
+                "batch_index": 0,
+                "preprocessing_seconds": 999.0,
+                "batch_decode_tokens_per_second": 999.0,
+            },
+            {
+                "example_id": "c",
+                "prediction": REFERENCE,
+                "inference_mode": "int8",
+                "batch_index": 1,
+                "preprocessing_seconds": 3.0,
+                "batch_decode_tokens_per_second": 0.0,
+            },
+        ],
+    )
+
+    performance = evaluate_files(references, predictions)["performance"]
+
+    assert performance["preprocessing_seconds_mean"] == 2.0
+    assert performance["batch_decode_tokens_per_second_mean"] == 6.0
+
+
 def test_checkpoint_selection_uses_declared_lexicographic_policy(tmp_path: Path) -> None:
     metrics = tmp_path / "metrics.jsonl"
     write_jsonl(

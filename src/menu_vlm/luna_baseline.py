@@ -382,6 +382,18 @@ _COUNT_KEYS = {
     "variant_correct",
     "variant_targets",
 }
+_LEGACY_COUNT_KEYS = _COUNT_KEYS - {
+    "price_issue_currency_only",
+    "price_issue_option_or_price_label_only",
+}
+_DOCUMENT_COUNT_KEY_INVENTORIES = frozenset(
+    {
+        frozenset(_COUNT_KEYS),
+        frozenset(_COUNT_KEYS - {"price_issue_missing_prices"}),
+        frozenset(_LEGACY_COUNT_KEYS),
+        frozenset(_LEGACY_COUNT_KEYS - {"price_issue_missing_prices"}),
+    }
+)
 _RATE_KEYS = {
     "cached_input_per_million",
     "endpoint",
@@ -2011,7 +2023,7 @@ def _valid_counts(value: Any, *, synthetic: bool, document: bool) -> bool:
     keys = set(value)
     if not document and keys != _COUNT_KEYS:
         return False
-    if document and (not keys <= _COUNT_KEYS or not keys):
+    if document and frozenset(keys) not in _DOCUMENT_COUNT_KEY_INVENTORIES:
         return False
     return all(_is_nonnegative_int(item) for item in value.values())
 

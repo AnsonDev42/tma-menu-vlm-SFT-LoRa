@@ -146,6 +146,11 @@ def test_predict_batches_two_examples_and_emits_phase_telemetry(
     for row in written:
         assert row["batch_size"] == 2
         assert row["generated_tokens"] == 1
+        assert row["decode_tokens"] == 0
+        assert row["decode_tokens_per_second"] == 0.0
+        assert row["batch_decode_tokens"] == 0
+        assert row["batch_decode_tokens_per_second"] == 0.0
+        assert row["tokens_per_second"] == 0.0
         assert set(row) >= {
             "preprocessing_seconds",
             "vision_encoder_seconds",
@@ -218,16 +223,57 @@ def test_aggregate_telemetry_cannot_include_payloads_or_paths() -> None:
                 "example_id": "private-id",
                 "raw_output": "private output",
                 "adapter_path": "/private/adapter",
+                "inference_mode": "int8",
+                "batch_index": 0,
                 "preprocessing_seconds": 1.0,
                 "generated_tokens": 2,
-            }
+                "decode_tokens": 1,
+                "decode_tokens_per_second": 4.0,
+                "batch_decode_tokens": 3,
+                "batch_decode_tokens_per_second": 12.0,
+            },
+            {
+                "example_id": "another-private-id",
+                "inference_mode": "int8",
+                "batch_index": 0,
+                "preprocessing_seconds": 999.0,
+                "generated_tokens": 3,
+                "decode_tokens": 2,
+                "decode_tokens_per_second": 8.0,
+                "batch_decode_tokens": 3,
+                "batch_decode_tokens_per_second": 12.0,
+            },
+            {
+                "example_id": "last-private-id",
+                "inference_mode": "int8",
+                "batch_index": 1,
+                "preprocessing_seconds": 3.0,
+                "generated_tokens": 1,
+                "decode_tokens": 0,
+                "decode_tokens_per_second": 0.0,
+                "batch_decode_tokens": 0,
+                "batch_decode_tokens_per_second": 0.0,
+            },
         ]
     )
     assert logged == {
-        "examples": 1,
-        "preprocessing_seconds_mean": 1.0,
+        "examples": 3,
+        "batches": 2,
+        "preprocessing_seconds_mean": 2.0,
         "generated_tokens_mean": 2.0,
+        "decode_tokens_mean": 1.0,
+        "decode_tokens_per_second_mean": 4.0,
+        "batch_decode_tokens_mean": 1.5,
+        "batch_decode_tokens_per_second_mean": 6.0,
     }
+
+
+def test_decode_throughput_excludes_ttft_token_and_handles_zero_duration() -> None:
+    assert prediction._decode_token_counts([1, 2, 5]) == [0, 1, 4]
+    assert prediction._throughput(0, 0.0) == 0.0
+    assert prediction._throughput(0, 1.0) == 0.0
+    assert prediction._throughput(3, 0.0) is None
+    assert prediction._throughput(3, 0.5) == 6.0
 
 
 class _Context:

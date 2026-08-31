@@ -103,7 +103,7 @@ def predict_dataset(
     )
     predictions: list[dict[str, Any]] = []
     try:
-        for batch in _batches(rows, batch_size):
+        for batch_index, batch in enumerate(_batches(rows, batch_size)):
             predictions.extend(
                 _predict_batch(
                     batch,
@@ -113,6 +113,7 @@ def predict_dataset(
                     torch=torch,
                     max_new_tokens=max_new_tokens,
                     inference_mode=inference_mode,
+                    batch_index=batch_index,
                 )
             )
         if len(predictions) != len(rows) or [row["example_id"] for row in predictions] != [
@@ -142,6 +143,7 @@ def _predict_batch(
     torch: Any,
     max_new_tokens: int,
     inference_mode: InferenceMode,
+    batch_index: int,
 ) -> list[dict[str, Any]]:
     conversations = [_prediction_messages(row, root) for row in rows]
     torch.cuda.reset_peak_memory_stats()
@@ -183,12 +185,17 @@ def _predict_batch(
     if len(decoded) != len(rows):
         raise RuntimeError("Generated batch size does not match input batch size")
     generated_token_counts = _generated_token_counts(generated_ids, processor)
+    decode_token_counts = _decode_token_counts(generated_token_counts)
     ttft_seconds = timer.first_token_at - timer.started
     prefill_seconds = max(0.0, ttft_seconds - timer.vision_seconds)
     decode_seconds = max(0.0, finished_at - timer.first_token_at)
     peak_memory = int(torch.cuda.max_memory_allocated())
+    batch_decode_tokens = sum(decode_token_counts)
+    batch_decode_throughput = _throughput(batch_decode_tokens, decode_seconds)
     result = []
-    for row, raw, generated_tokens in zip(rows, decoded, generated_token_counts, strict=True):
+    for row, raw, generated_tokens, decode_tokens in zip(
+        rows, decoded, generated_token_counts, decode_token_counts, strict=True
+    ):
         text = raw.strip()
         try:
             prediction: Any = json.loads(text)
@@ -200,6 +207,7 @@ def _predict_batch(
                 "prediction": prediction,
                 "raw_output": text,
                 "inference_mode": inference_mode,
+                "batch_index": batch_index,
                 "batch_size": len(rows),
                 "preprocessing_seconds": preprocessing_seconds,
                 "vision_encoder_seconds": timer.vision_seconds,
@@ -207,12 +215,13 @@ def _predict_batch(
                 "ttft_seconds": ttft_seconds,
                 "decode_seconds": decode_seconds,
                 "generated_tokens": generated_tokens,
-                "decode_tokens_per_second": (
-                    generated_tokens / decode_seconds if decode_seconds else None
-                ),
+                "decode_tokens": decode_tokens,
+                "decode_tokens_per_second": _throughput(decode_tokens, decode_seconds),
+                "batch_decode_tokens": batch_decode_tokens,
+                "batch_decode_tokens_per_second": batch_decode_throughput,
                 "latency_seconds": finished_at - timer.started + preprocessing_seconds,
                 "output_tokens": generated_tokens,
-                "tokens_per_second": generated_tokens / decode_seconds if decode_seconds else None,
+                "tokens_per_second": _throughput(decode_tokens, decode_seconds),
                 "peak_memory_bytes": peak_memory,
             }
         )
@@ -285,6 +294,16 @@ def _cuda_time(torch: Any) -> float:
     return time.monotonic()
 
 
+def _throughput(tokens: int, seconds: float) -> float | None:
+    if tokens == 0:
+        return 0.0
+    return tokens / seconds if seconds > 0 else None
+
+
+def _decode_token_counts(generated_token_counts: list[int]) -> list[int]:
+    return [max(count - 1, 0) for count in generated_token_counts]
+
+
 def _batches(rows: list[dict[str, Any]], size: int) -> Iterable[list[dict[str, Any]]]:
     for offset in range(0, len(rows), size):
         yield rows[offset : offset + size]
@@ -312,19 +331,38 @@ def _start_wandb(project: str | None, **config: str | int) -> Any | None:
 
 
 def _aggregate_telemetry(rows: list[dict[str, Any]]) -> dict[str, int | float]:
-    keys = (
+    per_example_keys = (
+        "generated_tokens",
+        "decode_tokens",
+        "decode_tokens_per_second",
+    )
+    per_batch_keys = (
         "preprocessing_seconds",
         "vision_encoder_seconds",
         "prefill_seconds",
         "ttft_seconds",
         "decode_seconds",
-        "generated_tokens",
-        "decode_tokens_per_second",
+        "batch_decode_tokens",
+        "batch_decode_tokens_per_second",
         "peak_memory_bytes",
     )
-    result: dict[str, int | float] = {"examples": len(rows)}
-    for key in keys:
+    batch_rows: dict[tuple[str, int], dict[str, Any]] = {}
+    for row in rows:
+        mode = row.get("inference_mode")
+        index = row.get("batch_index")
+        if isinstance(mode, str) and isinstance(index, int) and not isinstance(index, bool):
+            batch_rows.setdefault((mode, index), row)
+    result: dict[str, int | float] = {"examples": len(rows), "batches": len(batch_rows)}
+    for key in per_example_keys:
         values = [float(row[key]) for row in rows if isinstance(row.get(key), int | float)]
+        if values:
+            result[f"{key}_mean"] = statistics.fmean(values)
+    for key in per_batch_keys:
+        values = []
+        for row in batch_rows.values():
+            value = row.get(key)
+            if isinstance(value, int | float):
+                values.append(float(value))
         if values:
             result[f"{key}_mean"] = statistics.fmean(values)
     return result

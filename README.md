@@ -93,15 +93,18 @@ and [PEFT LoRA interface](https://huggingface.co/docs/peft/en/package_reference/
   with the same runtime, menus, and decoding settings.
 - **Try smaller weights.** Test INT8 and 4-bit weight quantization on GPUs with
   useful low-precision acceleration, then rerun the complete quality suite. A
-  smaller model is only a win if item and structural F1 hold up.
+  lower-memory weight representation is only a win if item and structural F1
+  hold up.
 - **Batch similar menus together.** Group examples by prompt and expected output
   length so a short menu does not wait behind a 4,096-token outlier.
 - **Benchmark the real serving shape.** Measure single-menu latency for the app
   separately from high-throughput offline evaluation, with TTFT, tokens/second,
   VRAM, and cost per 1,000 menus.
-- **Close the gap to Luna.** Use the canonical test failures to decide whether
-  the next gain should come from better labels, more data, or different LoRA
-  targets—not just more training steps.
+- **Close the gap to Luna.** Use validation and a dedicated diagnostic split to
+  decide whether the next gain should come from better labels, more data, or
+  different LoRA targets—not just more training steps. Keep the canonical test
+  frozen; if it ever guides development, replace it with a new untouched final
+  test set.
 
 ## Local development and synthetic proof
 

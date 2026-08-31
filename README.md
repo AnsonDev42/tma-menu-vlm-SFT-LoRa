@@ -26,43 +26,57 @@ at once without making the model worse? On an NVIDIA A40, BF16 + FlashAttention
 barely moved from **0.8212 to 0.8134**, while schema validity improved from
 **91.67% to 93.75%**.
 
-It was not a free win. Structural F1 fell from **0.6780 to 0.3462**, so the next
-job is to find out whether long outputs, padding, or batch-dependent decoding is
-scrambling section structure. Faster is useful; faster and wrong is not.
+### Final benchmark
 
-| v9 result | Value |
-|---|---:|
-| Frozen dataset | 500 records |
-| Pre-FA robustness capacity | 0.92 examples/minute |
-| FA2 batch-16 robustness capacity | **1.70 examples/minute** |
-| FA2 operator-observed GPU utilization | 94–99% |
-| FA2 operator-observed late-decode VRAM | 37.86 GiB / 44.99 GiB total |
-| Runpod billing confirmed before final partial hour | $0.38 |
+The clean test uses the same 12 menus for Luna, the original LoRA run, and the
+new FA2 run. Luna is still the quality target; it is an API baseline, so there is
+no local GPU speed number for it.
 
-Utilization, device-level memory, and billing are operator observations from the
-private pod session; model-quality and phase-timing values come from the
-retrieved aggregate metric artifacts.
+| Clean test | Luna | LoRA pre-FA | LoRA FA2, batch 2 |
+|---|---:|---:|---:|
+| Item F1 | **0.9766** | 0.8794 | 0.8049 |
+| OCR-line F1 | **0.9619** | 0.9330 | 0.8515 |
+| Structural F1 | **0.7559** | 0.7242 | 0.6944 |
+| Valid JSON schema | 100% | 100% | 91.67% |
+| Throughput | n/a | 16.82 tok/s | 20.73 aggregate tok/s |
 
-The full [v9 benchmark report](docs/v9-benchmark-report.md) has the Luna,
-pre-FA, and FA2 numbers, what we learned, and what we want to try next.
+The robustness test uses 48 harder, augmented menus. We have matched pre-FA and
+FA2 runs for this set, but no Luna robustness run yet.
 
-## What is pinned
+| Robustness test | LoRA pre-FA, batch 1 | LoRA FA2, batch 16 |
+|---|---:|---:|
+| Menus per minute | 0.92 | **1.70** |
+| Item F1 | 0.8212 | 0.8134 |
+| OCR-line F1 | 0.8860 | 0.8743 |
+| Structural F1 | **0.6780** | 0.3462 |
+| Valid JSON schema | 91.67% | **93.75%** |
+| Request latency | 65.08 s | 563.86 s |
 
-- Base: `Qwen/Qwen3-VL-4B-Instruct`
-- Revision: `ebb281ec70b05090aa6165b016eac8ec08e71b17`
-- Prompt: `menu-v2-vision-v1`, byte-for-byte TMA production system/user shape;
-  the 4,284-byte system prompt includes exactly one terminal LF and has SHA-256
-  `c4c4466bbdf49eb066bab6486bd9c9a0bf9230aeafb2da60b0ab02cd617fa476`
-- Training: seeded BF16 LoRA; one controlled 4-bit QLoRA fallback after OOM
-- Vision policy: vision blocks frozen; loaded language attention/MLP and exact
-  multimodal merger modules are resolved to exact PEFT targets
-- Split policy: preserve an immutable release's assignments; only explicitly
-  unsplit generic input may be split, deterministically by restaurant with
-  canonical-source fallback
+Batching gave us **1.85× more completed menus per minute**, but every individual
+menu waited longer for its batch. It was not a free win: structural F1 fell
+sharply, so the next job is to find out whether long outputs, padding, or
+batch-dependent decoding is scrambling section structure. Faster is useful;
+faster and wrong is not.
 
-The model revision is an Apache-2.0 4B vision-language checkpoint. The training
-implementation follows the model's native processor/chat-template interface and
-TRL's VLM dataset contract. See the upstream [Qwen model card](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct),
+The FA2 run kept the A40 around 94–99% utilized and peaked at 37.86 GiB of its
+44.99 GiB VRAM during late decoding. The private Runpod session cost about
+$0.38 before its final partial billing hour and was deleted after the artifacts
+were retrieved. These are operator observations; the quality and timing numbers
+above come from the saved aggregate metrics.
+
+The full [v9 benchmark report](docs/v9-benchmark-report.md) has the methodology,
+limitations, and next experiments.
+
+## Model setup
+
+- Base model: `Qwen/Qwen3-VL-4B-Instruct`
+- Training: BF16 LoRA on the language layers and multimodal merger
+- Vision encoder: frozen
+- Dataset: 500 private menu records with fixed train, validation, test, and
+  robustness splits
+- Evaluation: greedy decoding against the same compact section/item JSON schema
+
+See the upstream [Qwen model card](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct),
 [TRL VLM guidance](https://huggingface.co/docs/trl/sft_trainer#training-vision-language-models),
 and [PEFT LoRA interface](https://huggingface.co/docs/peft/en/package_reference/lora).
 
@@ -154,9 +168,9 @@ same frozen test twice.
 ## Runpod and returned artifacts
 
 [docs/runpod.md](docs/runpod.md) covers authenticated launch, checksum transfer,
-detached training, monitoring, retrieval, verification, cleanup, and the hard
-`$15` ceiling. Scripts require explicit paths and obtain secrets only from the
-environment or existing CLI configuration.
+detached training, monitoring, retrieval, verification, and cleanup. Scripts
+require explicit paths and obtain secrets only from the environment or existing
+CLI configuration.
 
 For a step-by-step repeat run with a new private release such as v9, use
 [docs/rerun-private-training.md](docs/rerun-private-training.md). It covers

@@ -40,6 +40,9 @@ no local GPU speed number for it.
 | Valid JSON schema | 100% | 100% | 91.67% |
 | Throughput | n/a | 16.82 tok/s | 20.73 aggregate tok/s |
 
+The token rates are directional, not apples-to-apples: the old metric covers the
+full `generate()` call, while the new metric isolates aggregate batch decoding.
+
 The robustness test uses 48 harder, augmented menus. We have matched pre-FA and
 FA2 runs for this set, but no Luna robustness run yet.
 
@@ -52,11 +55,13 @@ FA2 runs for this set, but no Luna robustness run yet.
 | Valid JSON schema | 91.67% | **93.75%** |
 | Request latency | 65.08 s | 563.86 s |
 
-Batching gave us **1.85× more completed menus per minute**, but every individual
-menu waited longer for its batch. It was not a free win: structural F1 fell
-sharply, so the next job is to find out whether long outputs, padding, or
-batch-dependent decoding is scrambling section structure. Faster is useful;
-faster and wrong is not.
+The FA2 batch-16 path completed **1.85× more menus per minute**, but every
+individual menu waited longer for its batch. This is an observed execution-path
+result, not an isolated batching or FlashAttention speedup: the runtime,
+attention backend, batch size, and telemetry changed together. It was not a free
+win either. Structural F1 fell sharply, so the next job is to find out whether
+long outputs, padding, or batch-dependent decoding is scrambling section
+structure. Faster is useful; faster and wrong is not.
 
 The FA2 run kept the A40 around 94–99% utilized and peaked at 37.86 GiB of its
 44.99 GiB VRAM during late decoding. The private Runpod session cost about

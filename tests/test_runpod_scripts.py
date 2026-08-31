@@ -31,11 +31,14 @@ def test_on_pod_bootstrap_checks_exact_qwen_processor_import_seam() -> None:
 
     assert smoke.is_file()
     assert "uv run python scripts/check-training-imports.py" in bootstrap
+    assert "uv sync --extra train --frozen --no-install-package flash-attn" in bootstrap
     source = smoke.read_text(encoding="utf-8")
     assert "Qwen3VLProcessor" in source
     assert "Qwen3VLVideoProcessor" in source
     assert '_require_version("torch", "2.13.0")' in source
     assert '_require_version("torchvision", "0.28.0")' in source
+    assert '_require_version("bitsandbytes", "0.50.2")' in source
+    assert '_require_version("flash-attn", "2.8.3.post1")' in source
 
 
 @pytest.mark.parametrize(

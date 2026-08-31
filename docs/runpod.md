@@ -150,6 +150,23 @@ exact compiled manifest file SHA-256. Bundle creation binds the copied fixed-nam
 provenance role to the public approved aggregate anchor and requires its baseline
 digest to equal the copied Luna prediction bytes.
 
+### Batched BF16/INT8 evaluation continuation
+
+To benchmark an already verified adapter without retraining, transfer the public
+source plus the private compiled dataset and verified adapter to a new guarded
+CUDA pod. Install Torch before the no-build-isolation FlashAttention package with
+`uv sync --extra train --frozen --no-install-package flash-attn`, followed by
+`uv sync --extra train --frozen` (add `--extra telemetry` to both only when
+aggregate W&B logging is explicitly wanted). Run `menu-vlm predict` with
+the same `--batch-size 2` and `--max-new-tokens` for `bf16` and `int8` on both
+`test.jsonl` and `robustness_test.jsonl`, then run `menu-vlm evaluate` for all
+four outputs. A successful receipt must show at least one prediction row with
+`batch_size: 2`, explicit phase telemetry, matching reference SHA-256 values for
+each BF16/INT8 pair, and clean/robustness metrics for both modes. Retrieve those
+private outputs and logs, verify their hashes locally, and delete the pod using
+the same guarded cleanup procedure. Never upload predictions, images, adapter
+bytes, dataset paths, or prompts to W&B.
+
 ## 5. Retrieve and verify before deletion
 
 ```bash

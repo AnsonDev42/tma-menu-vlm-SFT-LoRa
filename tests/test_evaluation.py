@@ -61,6 +61,8 @@ def test_evaluation_is_order_and_section_id_insensitive(tmp_path: Path) -> None:
     assert metrics["merge_errors"] == 0
     assert metrics["split_errors"] == 0
     assert metrics["performance"]["latency_seconds_mean"] == 0.5
+    assert metrics["provenance"]["references_sha256"]
+    assert metrics["provenance"]["predictions_sha256"]
 
 
 def test_evaluation_reports_invalid_schema_and_ocr_reference(tmp_path: Path) -> None:

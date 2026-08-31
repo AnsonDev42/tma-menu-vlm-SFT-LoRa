@@ -95,6 +95,7 @@ The contracts are in [docs/release-and-dataset.md](docs/release-and-dataset.md).
 The heavyweight environment is intended for a Linux GPU pod:
 
 ```bash
+uv sync --extra train --frozen --no-install-package flash-attn
 uv sync --extra train --frozen
 uv run menu-vlm preflight --config configs/qwen3-vl-4b-lora.json \
   --dataset "$MENU_COMPILED_PATH"

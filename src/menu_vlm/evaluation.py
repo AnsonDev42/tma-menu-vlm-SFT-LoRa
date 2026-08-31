@@ -68,6 +68,17 @@ def evaluate_files(
     latencies: list[float] = []
     throughputs: list[float] = []
     peak_memories: list[int] = []
+    phase_values: dict[str, list[float]] = {
+        key: []
+        for key in (
+            "preprocessing_seconds",
+            "vision_encoder_seconds",
+            "prefill_seconds",
+            "ttft_seconds",
+            "decode_seconds",
+            "decode_tokens_per_second",
+        )
+    }
     kind_rows: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
     for example_id in sorted(reference_by_id):
         reference_row = reference_by_id[example_id]
@@ -83,16 +94,25 @@ def evaluate_files(
             throughputs.append(float(throughput))
         if isinstance(peak_memory, int) and peak_memory >= 0:
             peak_memories.append(peak_memory)
+        for key, values in phase_values.items():
+            value = prediction_row.get(key)
+            if isinstance(value, int | float) and value >= 0:
+                values.append(float(value))
         kind = str(reference_row.get("kind", "primary"))
         pair = kind_rows.setdefault(kind, ([], []))
         pair[0].append(reference_row)
         pair[1].append(prediction_row)
 
     result = _summarize(totals)
+    result["provenance"] = {
+        "references_sha256": sha256_file(references_path),
+        "predictions_sha256": sha256_file(predictions_path),
+    }
     result["performance"] = {
         "latency_seconds_mean": _mean(latencies),
         "tokens_per_second_mean": _mean(throughputs),
         "peak_memory_bytes_max": max(peak_memories, default=None),
+        **{f"{key}_mean": _mean(values) for key, values in phase_values.items()},
     }
     result["documents"] = documents
     if len(kind_rows) > 1:

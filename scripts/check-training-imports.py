@@ -20,6 +20,8 @@ def main() -> None:
     report = {
         "torch": _require_version("torch", "2.13.0"),
         "torchvision": _require_version("torchvision", "0.28.0"),
+        "bitsandbytes": _require_version("bitsandbytes", "0.50.2"),
+        "flash_attn": _require_version("flash-attn", "2.8.3.post1"),
         "cuda_available": torch.cuda.is_available(),
         "processor": Qwen3VLProcessor.__name__,
         "video_processor": Qwen3VLVideoProcessor.__name__,

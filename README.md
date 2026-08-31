@@ -11,20 +11,24 @@ The repository contains code, contracts, and generated synthetic fixtures only.
 Real images, OCR, annotations, predictions, credentials, datasets, adapters, and
 checkpoints must remain outside Git.
 
-## Why this project is interesting
+## Training TMA's own menu model
 
-This is an end-to-end, evidence-driven VLM system rather than a training
-notebook. It includes deterministic multimodal dataset compilation, immutable
-split/provenance contracts, Qwen3-VL LoRA fine-tuning, Luna baseline comparison,
-frozen test gates, checksum-bound adapter artifacts, privacy-safe W&B telemetry,
-and cost-bounded Runpod execution.
+This repo is where we teach TMA to read menus with its own model. It turns our
+private menu images and OCR into a reproducible training set, fine-tunes
+Qwen3-VL with LoRA, and checks the result against Luna. The private menus and
+model weights stay out of Git; the code, data contracts, evaluation tools, and
+synthetic examples live here.
 
-The latest NVIDIA A40 experiment used BF16 + FlashAttention 2 and batched 16
-robustness examples at a time. On the matched 48-example robustness set it
-increased evaluation capacity **1.85×** versus the pre-FA batch-1 run, reaching
-**36.95 aggregate decode tok/s** while item F1 changed from **0.8212 to 0.8134**.
-Schema validity improved from **91.67% to 93.75%**, but structural F1 fell from
-**0.6780 to 0.3462**—an explicit open investigation, not a hidden tradeoff.
+The latest experiment asked a practical question: how many menus can we process
+at once without making the model worse? On an NVIDIA A40, BF16 + FlashAttention
+2 at batch 16 finished menus at **1.85× the rate** of the old batch-1 run on the
+48-example robustness set, reaching **36.95 aggregate decode tok/s**. Item F1
+barely moved from **0.8212 to 0.8134**, while schema validity improved from
+**91.67% to 93.75%**.
+
+It was not a free win. Structural F1 fell from **0.6780 to 0.3462**, so the next
+job is to find out whether long outputs, padding, or batch-dependent decoding is
+scrambling section structure. Faster is useful; faster and wrong is not.
 
 | v9 result | Value |
 |---|---:|
@@ -39,9 +43,8 @@ Utilization, device-level memory, and billing are operator observations from the
 private pod session; model-quality and phase-timing values come from the
 retrieved aggregate metric artifacts.
 
-Read the full [v9 engineering and benchmark report](docs/v9-benchmark-report.md)
-for the Luna, pre-FA, and FA2 comparisons, methodology, limitations, and next
-experiments.
+The full [v9 benchmark report](docs/v9-benchmark-report.md) has the Luna,
+pre-FA, and FA2 numbers, what we learned, and what we want to try next.
 
 ## What is pinned
 

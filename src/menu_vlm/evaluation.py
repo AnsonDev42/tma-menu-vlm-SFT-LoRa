@@ -68,7 +68,10 @@ def evaluate_files(
     latencies: list[float] = []
     throughputs: list[float] = []
     peak_memories: list[int] = []
-    phase_values: dict[str, list[float]] = {
+    per_example_phase_values: dict[str, list[float]] = {
+        "decode_tokens_per_second": [],
+    }
+    shared_batch_phase_values: dict[str, list[float]] = {
         key: []
         for key in (
             "preprocessing_seconds",
@@ -76,7 +79,6 @@ def evaluate_files(
             "prefill_seconds",
             "ttft_seconds",
             "decode_seconds",
-            "decode_tokens_per_second",
             "batch_decode_tokens_per_second",
         )
     }
@@ -96,6 +98,10 @@ def evaluate_files(
             throughputs.append(float(throughput))
         if isinstance(peak_memory, int) and peak_memory >= 0:
             peak_memories.append(peak_memory)
+        for key, values in per_example_phase_values.items():
+            value = prediction_row.get(key)
+            if isinstance(value, int | float) and value >= 0:
+                values.append(float(value))
         mode = prediction_row.get("inference_mode")
         batch_index = prediction_row.get("batch_index")
         batch_identity = (
@@ -106,7 +112,7 @@ def evaluate_files(
             else None
         )
         first_batch_row = batch_identity is None or batch_identity not in seen_batches
-        for key, values in phase_values.items():
+        for key, values in shared_batch_phase_values.items():
             value = prediction_row.get(key)
             if first_batch_row and isinstance(value, int | float) and value >= 0:
                 values.append(float(value))
@@ -126,7 +132,12 @@ def evaluate_files(
         "latency_seconds_mean": _mean(latencies),
         "tokens_per_second_mean": _mean(throughputs),
         "peak_memory_bytes_max": max(peak_memories, default=None),
-        **{f"{key}_mean": _mean(values) for key, values in phase_values.items()},
+        **{
+            f"{key}_mean": _mean(values)
+            for key, values in (
+                per_example_phase_values | shared_batch_phase_values
+            ).items()
+        },
     }
     result["documents"] = documents
     if len(kind_rows) > 1:

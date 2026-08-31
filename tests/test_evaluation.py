@@ -135,6 +135,43 @@ def test_evaluation_aggregates_shared_phase_telemetry_once_per_batch(tmp_path: P
     assert performance["batch_decode_tokens_per_second_mean"] == 6.0
 
 
+def test_evaluation_averages_heterogeneous_per_example_decode_throughput(
+    tmp_path: Path,
+) -> None:
+    references = tmp_path / "references.jsonl"
+    predictions = tmp_path / "predictions.jsonl"
+    write_jsonl(
+        references,
+        [
+            {"example_id": name, "ocr_line_count": 6, "target": REFERENCE}
+            for name in ("a", "b")
+        ],
+    )
+    write_jsonl(
+        predictions,
+        [
+            {
+                "example_id": "a",
+                "prediction": REFERENCE,
+                "inference_mode": "int8",
+                "batch_index": 0,
+                "decode_tokens_per_second": 2.0,
+            },
+            {
+                "example_id": "b",
+                "prediction": REFERENCE,
+                "inference_mode": "int8",
+                "batch_index": 0,
+                "decode_tokens_per_second": 8.0,
+            },
+        ],
+    )
+
+    performance = evaluate_files(references, predictions)["performance"]
+
+    assert performance["decode_tokens_per_second_mean"] == 5.0
+
+
 def test_checkpoint_selection_uses_declared_lexicographic_policy(tmp_path: Path) -> None:
     metrics = tmp_path / "metrics.jsonl"
     write_jsonl(

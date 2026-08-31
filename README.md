@@ -19,58 +19,42 @@ Qwen3-VL with LoRA, and checks the result against Luna. The private menus and
 model weights stay out of Git; the code, data contracts, evaluation tools, and
 synthetic examples live here.
 
-The latest experiment asked a practical question: how many menus can we process
-at once without making the model worse? On an NVIDIA A40, BF16 + FlashAttention
-2 at batch 16 finished menus at **1.85× the rate** of the old batch-1 run on the
-48-example robustness set, reaching **36.95 aggregate decode tok/s**. Item F1
-barely moved from **0.8212 to 0.8134**, while schema validity improved from
-**91.67% to 93.75%**.
+### Model progress
 
-### Final benchmark
+The first version trained on a small pilot dataset. Its validation score looked
+great, but the test exposed the real problem: it did not generalize yet. The
+current v9 run uses a much larger private dataset and a broader evaluation set.
 
-The clean test uses the same 12 menus for Luna, the original LoRA run, and the
-new FA2 run. Luna is still the quality target; it is an API baseline, so there is
-no local GPU speed number for it.
+| Run | Split | Menus | Item F1 | Structural F1 | Valid JSON |
+|---|---|---:|---:|---:|---:|
+| v1 LoRA, pilot dataset | Validation | 3 | **0.9808** | **0.8192** | 100% |
+| v1 LoRA, pilot dataset | Test | 3 | 0.7167 | 0.6446 | 66.67% |
+| v9 LoRA, expanded dataset | Validation | 13 | 0.7872 | 0.7119 | 92.31% |
+| v9 LoRA, expanded dataset | Test | 12 | **0.8794** | **0.7242** | **100%** |
+| Luna baseline | v9 test | 12 | 0.9766 | 0.7559 | 100% |
 
-| Clean test | Luna | LoRA pre-FA | LoRA FA2, batch 2 |
-|---|---:|---:|---:|
-| Item F1 | **0.9766** | 0.8794 | 0.8049 |
-| OCR-line F1 | **0.9619** | 0.9330 | 0.8515 |
-| Structural F1 | **0.7559** | 0.7242 | 0.6944 |
-| Valid JSON schema | 100% | 100% | 91.67% |
-| Throughput | n/a | 16.82 tok/s | 20.73 aggregate tok/s |
+The pilot and v9 sets are different sizes, so this is project history rather
+than a controlled benchmark. The direction is still encouraging: test item F1
+moved from **0.7167 to 0.8794**, structural F1 from **0.6446 to 0.7242**, and
+valid JSON from **66.67% to 100%**. Luna is still ahead, but the gap is smaller.
 
-The token rates are directional, not apples-to-apples: the old metric covers the
-full `generate()` call, while the new metric isolates aggregate batch decoding.
+### Did faster inference hurt quality?
 
-The robustness test uses 48 harder, augmented menus. We have matched pre-FA and
-FA2 runs for this set, but no Luna robustness run yet.
+We also ran the same 48 robustness menus through the original inference path and
+the new BF16 + FlashAttention 2 path.
 
-| Robustness test | LoRA pre-FA, batch 1 | LoRA FA2, batch 16 |
+| Robustness metric | Original | FA2 |
 |---|---:|---:|
-| Menus per minute | 0.92 | **1.70** |
-| Item F1 | 0.8212 | 0.8134 |
-| OCR-line F1 | 0.8860 | 0.8743 |
+| Item F1 | **0.8212** | 0.8134 |
+| OCR-line F1 | **0.8860** | 0.8743 |
 | Structural F1 | **0.6780** | 0.3462 |
-| Valid JSON schema | 91.67% | **93.75%** |
-| Request latency | 65.08 s | 563.86 s |
+| Valid JSON | 91.67% | **93.75%** |
 
-The FA2 batch-16 path completed **1.85× more menus per minute**, but every
-individual menu waited longer for its batch. This is an observed execution-path
-result, not an isolated batching or FlashAttention speedup: the runtime,
-attention backend, batch size, and telemetry changed together. It was not a free
-win either. Structural F1 fell sharply, so the next job is to find out whether
-long outputs, padding, or batch-dependent decoding is scrambling section
-structure. Faster is useful; faster and wrong is not.
+Item/OCR F1 and valid JSON stayed close, but structural F1 did not. We are not
+treating the faster path as a free win until we understand that drop.
 
-The FA2 run kept the A40 around 94–99% utilized and peaked at 37.86 GiB of its
-44.99 GiB VRAM during late decoding. The private Runpod session cost about
-$0.38 before its final partial billing hour and was deleted after the artifacts
-were retrieved. These are operator observations; the quality and timing numbers
-above come from the saved aggregate metrics.
-
-The full [v9 benchmark report](docs/v9-benchmark-report.md) has the methodology,
-limitations, and next experiments.
+The full [v9 benchmark report](docs/v9-benchmark-report.md) keeps the inference
+timings, hardware details, limitations, and next experiments.
 
 ## Model setup
 

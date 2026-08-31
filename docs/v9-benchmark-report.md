@@ -3,22 +3,36 @@
 ## Executive summary
 
 This repository turns a production menu-understanding task into a reproducible
-vision-language-model workflow: immutable data releases, deterministic
-compilation, provenance-bound Luna baselines, parameter-efficient Qwen3-VL
-fine-tuning, frozen evaluation gates, private artifact handling, and instrumented
-GPU inference.
+vision-language-model workflow: private dataset compilation, Luna baselines,
+Qwen3-VL LoRA fine-tuning, evaluation, artifact handling, and GPU inference.
 
-The current v9 experiment fine-tuned `Qwen/Qwen3-VL-4B-Instruct` with a BF16
-LoRA adapter, then tested batched inference with FlashAttention 2 on an NVIDIA
-A40. On the matched 48-example robustness set, FA2 at batch 16 increased
-end-to-end evaluation capacity from roughly **0.92 to 1.70 examples/minute**
-(**1.85×**) while item F1 moved from **0.8212 to 0.8134**. The result is useful,
-but not a clean attribution to FlashAttention: the runtime, attention backend,
-batch size, and telemetry implementation changed together.
+The biggest result is model progress. The pilot LoRA test produced **0.7167 item
+F1**, **0.6446 structural F1**, and **66.67% valid JSON**. The expanded v9 run
+reached **0.8794**, **0.7242**, and **100%** respectively. Luna remains the target
+at **0.9766 item F1** and **0.7559 structural F1**.
 
-The strongest next experiment is therefore a controlled matrix on the same
-examples: FA2 on/off × batch 1/2/4/8/16, with identical decoding and the current
-phase-level telemetry.
+We also tested BF16 + FlashAttention 2 on an NVIDIA A40. Item and OCR F1 stayed
+close on the 48-example robustness set, but structural F1 fell from **0.6780 to
+0.3462**. That quality drop matters more than the throughput gain and remains
+the main inference follow-up.
+
+The next work should improve the model first: add harder training examples, tune
+the LoRA/vision adaptation boundary, and train more directly for menu structure.
+A controlled FA2/batch matrix can then optimize the winning checkpoint.
+
+## Model progress
+
+The first LoRA run used a small pilot dataset; v9 used a much larger private
+dataset and broader evaluation. Because the inventories differ, the table shows
+the project's progression rather than a controlled experiment.
+
+| Run | Split | Menus | Item F1 | Structural F1 | Valid JSON |
+|---|---|---:|---:|---:|---:|
+| Pilot LoRA | Validation | 3 | 0.9808 | 0.8192 | 100% |
+| Pilot LoRA | Test | 3 | 0.7167 | 0.6446 | 66.67% |
+| v9 LoRA | Validation | 13 | 0.7872 | 0.7119 | 92.31% |
+| v9 LoRA | Test | 12 | 0.8794 | 0.7242 | 100% |
+| Luna | v9 test | 12 | **0.9766** | **0.7559** | 100% |
 
 ## What was built
 
@@ -135,18 +149,15 @@ can distinguish those explanations.
 
 ## Next steps
 
-1. Run a controlled FA2 on/off matrix over the same robustness examples and
-   identical Torch/Transformers/decoding versions.
-2. Sweep batch 1/2/4/8/16 and report examples/minute, aggregate tokens/second,
-   TTFT, peak late-decode VRAM, and every quality metric.
-3. Bucket menus by prompt size and expected output length so short generations
-   do not wait behind 4,096-token outliers.
-4. Inspect the structural-F1 failures by example and determine whether they come
-   from section assignment, truncated JSON, padding, or batch-dependent decoding.
-5. Compare the LoRA errors with Luna on the canonical test set and prioritize
-   data/target changes where Luna retains a clear advantage.
-6. Keep INT8 as a separate hardware-specific experiment rather than mixing it
-   into the FA2/BF16 comparison.
+1. Collect and label harder training menus around recurring structural errors.
+2. Tune LoRA rank, learning rate, target modules, and selective vision unfreezing.
+3. Try curriculum and structure-weighted training for sections, ownership, and
+   valid JSON.
+4. Explore human-checked Luna distillation on training or newly collected data.
+5. Compare stronger base models, then run the controlled FA2/batch sweep on the
+   best-quality checkpoint.
+6. Quantize that checkpoint to INT8 and 4-bit only if the complete F1 and valid
+   JSON suite holds up.
 
 ## Reproducing the public workflow
 

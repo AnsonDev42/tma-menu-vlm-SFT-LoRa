@@ -89,8 +89,8 @@ and [PEFT LoRA interface](https://huggingface.co/docs/peft/en/package_reference/
 
 - **Feed it harder menus.** Add more dense, multilingual, multi-column, low-light,
   and unusual-price layouts instead of repeating the easy cases we already solve.
-- **Turn mistakes into training data.** Mine validation failures, clean up the
-  labels, and build a focused set for missed headers, merged dishes, split dishes,
+- **Turn mistakes into better training data.** Use recurring error patterns to
+  collect and label new examples for missed headers, merged dishes, split dishes,
   notes, and section ownership.
 - **Tune what LoRA can learn.** Sweep rank, alpha, learning rate, and target
   modules; compare language-only adaptation with the multimodal merger and a
@@ -98,9 +98,9 @@ and [PEFT LoRA interface](https://huggingface.co/docs/peft/en/package_reference/
 - **Teach structure more directly.** Try curriculum training from simple to dense
   menus and give extra weight to section boundaries, item ownership, and valid
   JSON—not just token-level imitation.
-- **Learn from the stronger baseline.** Explore human-checked Luna outputs for
-  distillation or pseudo-labeling, especially where Luna finds the right menu
-  structure and the LoRA model does not.
+- **Learn from the stronger baseline.** Explore human-checked Luna outputs on the
+  training pool or newly collected unlabeled menus for distillation and
+  pseudo-labeling, especially on difficult menu structure.
 - **Try a stronger base.** Compare the current 4B checkpoint with newer or larger
   Qwen-VL variants and measure whether the quality gain is worth the extra GPU
   cost.

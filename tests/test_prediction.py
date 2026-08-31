@@ -183,6 +183,32 @@ def test_model_validation_rejects_offload_and_missing_flash_attention() -> None:
         )
 
 
+def test_model_validation_audits_tensor_devices_without_hf_device_map() -> None:
+    cuda_tensor = SimpleNamespace(device="cuda:0")
+    model = SimpleNamespace(
+        parameters=lambda: iter((cuda_tensor,)),
+        buffers=lambda: iter((cuda_tensor,)),
+        config=SimpleNamespace(_attn_implementation="flash_attention_2"),
+    )
+
+    prediction._validate_cuda_model(model)
+
+    model.parameters = lambda: iter((cuda_tensor, SimpleNamespace(device="cpu")))
+    with pytest.raises(RuntimeError, match="offload"):
+        prediction._validate_cuda_model(model)
+
+
+def test_model_validation_fails_closed_without_auditable_tensor_devices() -> None:
+    model = SimpleNamespace(
+        parameters=lambda: iter(()),
+        buffers=lambda: iter(()),
+        config=SimpleNamespace(_attn_implementation="flash_attention_2"),
+    )
+
+    with pytest.raises(RuntimeError, match="auditable parameter or buffer devices"):
+        prediction._validate_cuda_model(model)
+
+
 def test_wandb_receives_only_public_config(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
     run = SimpleNamespace()

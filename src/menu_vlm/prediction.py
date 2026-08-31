@@ -249,9 +249,18 @@ def _require_cuda(torch: Any) -> None:
 
 def _validate_cuda_model(model: Any) -> None:
     device_map = getattr(model, "hf_device_map", None)
-    if not isinstance(device_map, dict) or not device_map:
-        raise RuntimeError("Loaded model did not expose an auditable CUDA device map")
-    unsafe = {str(device) for device in device_map.values() if not _is_cuda_device(device)}
+    if isinstance(device_map, dict) and device_map:
+        devices = set(device_map.values())
+    else:
+        devices = {
+            getattr(tensor, "device", None)
+            for collection in (model.parameters(), model.buffers())
+            for tensor in collection
+        }
+        devices.discard(None)
+        if not devices:
+            raise RuntimeError("Loaded model did not expose auditable parameter or buffer devices")
+    unsafe = {str(device) for device in devices if not _is_cuda_device(device)}
     if unsafe:
         raise RuntimeError(f"CPU/disk model offload is forbidden: {sorted(unsafe)}")
     implementation = getattr(getattr(model, "config", None), "_attn_implementation", None)

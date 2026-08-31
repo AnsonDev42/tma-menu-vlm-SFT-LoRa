@@ -102,9 +102,7 @@ and [PEFT LoRA interface](https://huggingface.co/docs/peft/en/package_reference/
   VRAM, and cost per 1,000 menus.
 - **Close the gap to Luna.** Use validation and a dedicated diagnostic split to
   decide whether the next gain should come from better labels, more data, or
-  different LoRA targets—not just more training steps. Keep the canonical test
-  frozen; if it ever guides development, replace it with a new untouched final
-  test set.
+  different LoRA targets—not just more training steps.
 
 ## Local development and synthetic proof
 

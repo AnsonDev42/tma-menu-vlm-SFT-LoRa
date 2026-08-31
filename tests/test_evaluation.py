@@ -61,6 +61,8 @@ def test_evaluation_is_order_and_section_id_insensitive(tmp_path: Path) -> None:
     assert metrics["merge_errors"] == 0
     assert metrics["split_errors"] == 0
     assert metrics["performance"]["latency_seconds_mean"] == 0.5
+    assert metrics["provenance"]["references_sha256"]
+    assert metrics["provenance"]["predictions_sha256"]
 
 
 def test_evaluation_reports_invalid_schema_and_ocr_reference(tmp_path: Path) -> None:
@@ -85,6 +87,89 @@ def test_evaluation_requires_exact_prediction_accounting(tmp_path: Path) -> None
     predictions.write_text("", encoding="utf-8")
     with pytest.raises(ValueError, match="Prediction IDs"):
         evaluate_files(references, predictions)
+
+
+def test_evaluation_aggregates_shared_phase_telemetry_once_per_batch(tmp_path: Path) -> None:
+    references = tmp_path / "references.jsonl"
+    predictions = tmp_path / "predictions.jsonl"
+    write_jsonl(
+        references,
+        [
+            {"example_id": name, "ocr_line_count": 6, "target": REFERENCE}
+            for name in ("a", "b", "c")
+        ],
+    )
+    write_jsonl(
+        predictions,
+        [
+            {
+                "example_id": "a",
+                "prediction": REFERENCE,
+                "inference_mode": "int8",
+                "batch_index": 0,
+                "preprocessing_seconds": 1.0,
+                "batch_decode_tokens_per_second": 12.0,
+            },
+            {
+                "example_id": "b",
+                "prediction": REFERENCE,
+                "inference_mode": "int8",
+                "batch_index": 0,
+                "preprocessing_seconds": 999.0,
+                "batch_decode_tokens_per_second": 999.0,
+            },
+            {
+                "example_id": "c",
+                "prediction": REFERENCE,
+                "inference_mode": "int8",
+                "batch_index": 1,
+                "preprocessing_seconds": 3.0,
+                "batch_decode_tokens_per_second": 0.0,
+            },
+        ],
+    )
+
+    performance = evaluate_files(references, predictions)["performance"]
+
+    assert performance["preprocessing_seconds_mean"] == 2.0
+    assert performance["batch_decode_tokens_per_second_mean"] == 6.0
+
+
+def test_evaluation_averages_heterogeneous_per_example_decode_throughput(
+    tmp_path: Path,
+) -> None:
+    references = tmp_path / "references.jsonl"
+    predictions = tmp_path / "predictions.jsonl"
+    write_jsonl(
+        references,
+        [
+            {"example_id": name, "ocr_line_count": 6, "target": REFERENCE}
+            for name in ("a", "b")
+        ],
+    )
+    write_jsonl(
+        predictions,
+        [
+            {
+                "example_id": "a",
+                "prediction": REFERENCE,
+                "inference_mode": "int8",
+                "batch_index": 0,
+                "decode_tokens_per_second": 2.0,
+            },
+            {
+                "example_id": "b",
+                "prediction": REFERENCE,
+                "inference_mode": "int8",
+                "batch_index": 0,
+                "decode_tokens_per_second": 8.0,
+            },
+        ],
+    )
+
+    performance = evaluate_files(references, predictions)["performance"]
+
+    assert performance["decode_tokens_per_second_mean"] == 5.0
 
 
 def test_checkpoint_selection_uses_declared_lexicographic_policy(tmp_path: Path) -> None:

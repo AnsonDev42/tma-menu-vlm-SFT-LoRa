@@ -72,8 +72,8 @@ def build_quote(args: argparse.Namespace) -> dict[str, Any]:
     container_gb = _nonnegative_integer(args.container_gb, "container-gb")
     volume_gb = _nonnegative_integer(args.volume_gb, "volume-gb")
     cap = _positive_decimal(args.cap_usd, "cap-usd")
-    if cap != Decimal("15"):
-        raise ValueError("the approved hard cost cap must be exactly $15")
+    if cap > Decimal("15"):
+        raise ValueError("the approved hard cost cap may not exceed $15")
     if args.data_center_id:
         placements = gpu.get("dataCenterAvailability")
         if not isinstance(placements, list):
@@ -99,7 +99,9 @@ def build_quote(args: argparse.Namespace) -> dict[str, Any]:
     storage_cost = hours * storage_hourly
     total = compute_cost + storage_cost
     if total <= 0 or total > cap:
-        raise ValueError(f"refusing launch: projected combined cost {_usd(total)} exceeds $15")
+        raise ValueError(
+            f"refusing launch: projected combined cost {_usd(total)} exceeds {_usd(cap)}"
+        )
     balance = _positive_decimal(user.get("clientBalance"), "Runpod clientBalance")
     if total > balance:
         raise ValueError(
@@ -129,8 +131,11 @@ def build_quote(args: argparse.Namespace) -> dict[str, Any]:
 def create_receipt(quote_path: Path, pod_id: str, output: Path) -> dict[str, Any]:
     _validate_pod_id(pod_id)
     quote = _read_json(quote_path)
-    if not isinstance(quote, dict) or quote.get("cap_usd") != "15":
-        raise ValueError("cost quote is missing the approved $15 cap")
+    if not isinstance(quote, dict):
+        raise ValueError("cost quote has an invalid shape")
+    cap = _positive_decimal(quote.get("cap_usd"), "quoted cap-usd")
+    if cap > Decimal("15"):
+        raise ValueError("cost quote exceeds the approved $15 maximum")
     seconds = int(quote.get("max_seconds", 0))
     if seconds < 1:
         raise ValueError("cost quote has no positive bounded duration")

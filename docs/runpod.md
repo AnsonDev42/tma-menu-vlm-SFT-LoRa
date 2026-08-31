@@ -8,12 +8,13 @@ then delete the pod](https://github.com/runpod/runpodctl).
 
 ## Cost and stop policy
 
-The hard combined compute/storage policy for this experiment is `$15`, retaining
-`$5` of the available credit for recovery. `launch-pod.sh` reads the selected
+Set `RUNPOD_MAX_COST_USD` before launch to impose the hard combined
+compute/storage policy for that run (it defaults to `$15` and rejects any value
+above `$15`). `launch-pod.sh` reads the selected
 GPU's current on-demand price directly from `runpodctl gpu list
 --include-unavailable`, requires explicit container/volume sizes, adds Runpod's
 published running storage rates, checks the live account balance, and rejects a
-combined quote above `$15`. Caller-provided hourly prices are not accepted.
+combined quote above that cap. Caller-provided hourly prices are not accepted.
 
 Current `runpodctl` v2.12.0 has no `pod create --terminate-after` flag. The launch
 script therefore creates the pod with supported flags and immediately arms a
@@ -80,10 +81,12 @@ manifest before parsing; production has no fallback.
 
 ## 2. Launch with a bounded local deletion guard
 
-Pick a maximum duration and explicit disk sizes whose live combined quote is at
-most `$15`. Supply an official/current PyTorch template ID:
+Choose a cap and maximum duration before launch. For example, this makes the
+combined quote fail closed above `$10`; the cap may never exceed `$15`. Supply an
+official/current PyTorch template ID:
 
 ```bash
+export RUNPOD_MAX_COST_USD=10
 scripts/runpod/launch-pod.sh tma-qwen3-vl TEMPLATE_ID "NVIDIA A40" 8 20 100 DC_ID
 ```
 
@@ -146,6 +149,23 @@ window between frozen evaluation and artifact packaging. The gate also freezes t
 exact compiled manifest file SHA-256. Bundle creation binds the copied fixed-name
 provenance role to the public approved aggregate anchor and requires its baseline
 digest to equal the copied Luna prediction bytes.
+
+### Batched BF16/INT8 evaluation continuation
+
+To benchmark an already verified adapter without retraining, transfer the public
+source plus the private compiled dataset and verified adapter to a new guarded
+CUDA pod. Install Torch before the no-build-isolation FlashAttention package with
+`uv sync --extra train --frozen --no-install-package flash-attn`, followed by
+`uv sync --extra train --frozen` (add `--extra telemetry` to both only when
+aggregate W&B logging is explicitly wanted). Run `menu-vlm predict` with
+the same `--batch-size 2` and `--max-new-tokens` for `bf16` and `int8` on both
+`test.jsonl` and `robustness_test.jsonl`, then run `menu-vlm evaluate` for all
+four outputs. A successful receipt must show at least one prediction row with
+`batch_size: 2`, explicit phase telemetry, matching reference SHA-256 values for
+each BF16/INT8 pair, and clean/robustness metrics for both modes. Retrieve those
+private outputs and logs, verify their hashes locally, and delete the pod using
+the same guarded cleanup procedure. Never upload predictions, images, adapter
+bytes, dataset paths, or prompts to W&B.
 
 ## 5. Retrieve and verify before deletion
 

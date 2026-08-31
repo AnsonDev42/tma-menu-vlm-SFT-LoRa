@@ -29,7 +29,8 @@ uv run menu-vlm predict \
   --dataset /workspace/private-dataset \
   --split-file validation.jsonl \
   --adapter /workspace/run/training/checkpoints/checkpoint-N \
-  --output /workspace/run/checkpoint-N.predictions.jsonl
+  --output /workspace/run/checkpoint-N.predictions.jsonl \
+  --batch-size 2 --inference-mode bf16
 
 uv run menu-vlm evaluate \
   --references /workspace/private-dataset/validation.jsonl \
@@ -57,6 +58,36 @@ uses the same metrics on its separate split. Pass saved
 Luna predictions with `--luna-predictions` for an identical baseline report.
 For the primary frozen test this argument is mandatory; the Runpod workflow never
 falls back to a test report without the saved baseline.
+
+Prediction is deliberately CUDA-only. BF16 and INT8 both request
+`flash_attention_2`, pin the entire model to `cuda:0`, and fail if Transformers
+reports CPU/disk offload or a different attention implementation. INT8 uses the
+bitsandbytes CUDA backend (`load_in_8bit=True`); it cannot silently run on macOS.
+`--batch-size` batches complete multimodal conversations and preserves input
+order and exact example count. Each row records image preprocessing, vision
+encoder, LLM prefill, time to first token, decode duration, generated-token
+count, decode-token count, decode throughput, total latency, and peak CUDA memory.
+Decode tokens deliberately exclude the first token attributed to TTFT; a
+one-token completion therefore has zero decode tokens and zero decode throughput.
+Per-example throughput uses that example's post-TTFT tokens, while batch
+throughput sums post-TTFT tokens across the batch and divides by the one shared
+decode interval. Aggregate telemetry counts shared phase timings once per batch.
+Evaluation files
+carry SHA-256 provenance for their exact references and predictions.
+
+Optional W&B logging requires `uv sync --extra train --extra telemetry`. Pass a
+public-safe project name with `--wandb-project`. Only the pinned public model
+configuration, inference mode, requested batch/token limits, example count, and
+aggregate scalar telemetry are sent. Dataset paths, split names, example IDs,
+images, prompts, predictions, and adapter paths are never logged.
+
+For the frozen BF16/INT8 benchmark, run both modes with the same compiled split,
+adapter, batch size, and token limit, then evaluate each prediction file against
+the same references. Compare the resulting structural and performance metrics
+only after confirming their `provenance.references_sha256` values are identical
+and equal the corresponding `files_sha256` entry in the compiled manifest. Run
+this for both `test.jsonl` (clean) and `robustness_test.jsonl`; keep all payloads
+and outputs in the private Runpod root.
 
 ## Consume frozen test once
 

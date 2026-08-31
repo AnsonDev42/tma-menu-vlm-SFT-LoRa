@@ -143,13 +143,14 @@ and are deliberately included only in the returned private adapter bundle.
 
 ## 4. Launch a bounded Runpod pod
 
-Authenticate through the environment, inspect live availability immediately
-before launch, and use an official PyTorch Runpod template ID. The first
-baseline configuration is one secure 48 GB A40, up to three epochs, with 20 GB
-container storage and 100 GB workspace storage.
+Authenticate through either `runpodctl` or the already-authorized Runpod MCP,
+inspect live availability immediately before launch, and use an official PyTorch
+image. The first baseline configuration is one secure 48 GB A40, up to three
+epochs, with 20 GB container storage and 100 GB workspace storage.
 
 ```bash
 export RUNPOD_API_KEY=... # shell environment only
+export RUNPOD_MAX_COST_USD=10 # hard budget for this run; must be <= 15
 runpodctl update
 runpodctl version
 runpodctl user
@@ -159,9 +160,17 @@ scripts/runpod/launch-pod.sh \
   "$RUN_ID" TEMPLATE_ID "NVIDIA A40" 8 20 100 EU-SE-1
 ```
 
+When using the authenticated Runpod MCP instead, create the equivalent secure
+pod with GPU type `NVIDIA A40`, image
+`runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404`, a 20 GB container disk, a
+100 GB `/workspace` volume, and your public SSH key. Do not copy an MCP
+credential into a shell environment. Read the resulting pod record and retain
+only its direct SSH host, port, and pod ID in private run notes.
+
 Replace `TEMPLATE_ID` and `EU-SE-1` with a currently available official template
-and data center. The launcher obtains the live GPU price, enforces the current
-USD 15 combined compute/storage cap, writes a guard receipt, and arms a
+and data center. The launcher obtains the live GPU price, enforces
+`RUNPOD_MAX_COST_USD` (USD 10 in this example; never more than USD 15) across
+compute and storage, writes a guard receipt, and arms a
 host-local deletion watchdog. Keep the launching Mac awake until cleanup; the
 watchdog cannot run while it is asleep. Save the returned `POD_ID` and guard
 receipt path:
@@ -197,6 +206,15 @@ scripts/runpod/run-training.sh \
   "$GUARD_RECEIPT"
 ```
 
+For an MCP-created pod, use the returned direct SSH host and port. On macOS's
+built-in rsync, omit `--info=progress2` and add `--no-owner --no-group` (Runpod
+workspace volumes reject ownership preservation). Transfer the public checkout
+without `.git`, `.venv`, `.env`, caches, or private data; transfer the archive
+and Luna/trust-root evidence files only to the private remote directory; then
+run `sha256sum -c` against every transferred sidecar before starting work. The
+on-pod verifier rejects symlinks, so the evidence files in its `incoming/`
+directory must be ordinary copied files, not aliases to another remote path.
+
 Monitor until the remote log contains `TRAIN_EVAL_BUNDLE_DONE`:
 
 ```bash
@@ -210,6 +228,12 @@ fallback only after a CUDA OOM), scores every checkpoint on validation, selects
 by structural F1 then item F1 then validation loss, evaluates robustness, and
 consumes the primary test once. Any checksum failure, non-finite loss, second
 OOM, or test-gate failure stops the run.
+
+`run-training.sh` consumes the local CLI guard receipt. If the pod was created
+through MCP and no such receipt exists, start `on-pod-train.sh` over SSH in a
+detached `setsid timeout 6h` process instead. That timeout is a secondary cap,
+not a substitute for account billing controls; retrieve the result and delete
+the pod through MCP immediately after verification.
 
 ## 6. Retrieve and verify the returned adapter
 

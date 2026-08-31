@@ -68,6 +68,21 @@ def evaluate_files(
     latencies: list[float] = []
     throughputs: list[float] = []
     peak_memories: list[int] = []
+    per_example_phase_values: dict[str, list[float]] = {
+        "decode_tokens_per_second": [],
+    }
+    shared_batch_phase_values: dict[str, list[float]] = {
+        key: []
+        for key in (
+            "preprocessing_seconds",
+            "vision_encoder_seconds",
+            "prefill_seconds",
+            "ttft_seconds",
+            "decode_seconds",
+            "batch_decode_tokens_per_second",
+        )
+    }
+    seen_batches: set[tuple[str, int]] = set()
     kind_rows: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
     for example_id in sorted(reference_by_id):
         reference_row = reference_by_id[example_id]
@@ -83,16 +98,46 @@ def evaluate_files(
             throughputs.append(float(throughput))
         if isinstance(peak_memory, int) and peak_memory >= 0:
             peak_memories.append(peak_memory)
+        for key, values in per_example_phase_values.items():
+            value = prediction_row.get(key)
+            if isinstance(value, int | float) and value >= 0:
+                values.append(float(value))
+        mode = prediction_row.get("inference_mode")
+        batch_index = prediction_row.get("batch_index")
+        batch_identity = (
+            (mode, batch_index)
+            if isinstance(mode, str)
+            and isinstance(batch_index, int)
+            and not isinstance(batch_index, bool)
+            else None
+        )
+        first_batch_row = batch_identity is None or batch_identity not in seen_batches
+        for key, values in shared_batch_phase_values.items():
+            value = prediction_row.get(key)
+            if first_batch_row and isinstance(value, int | float) and value >= 0:
+                values.append(float(value))
+        if batch_identity is not None:
+            seen_batches.add(batch_identity)
         kind = str(reference_row.get("kind", "primary"))
         pair = kind_rows.setdefault(kind, ([], []))
         pair[0].append(reference_row)
         pair[1].append(prediction_row)
 
     result = _summarize(totals)
+    result["provenance"] = {
+        "references_sha256": sha256_file(references_path),
+        "predictions_sha256": sha256_file(predictions_path),
+    }
     result["performance"] = {
         "latency_seconds_mean": _mean(latencies),
         "tokens_per_second_mean": _mean(throughputs),
         "peak_memory_bytes_max": max(peak_memories, default=None),
+        **{
+            f"{key}_mean": _mean(values)
+            for key, values in (
+                per_example_phase_values | shared_batch_phase_values
+            ).items()
+        },
     }
     result["documents"] = documents
     if len(kind_rows) > 1:

@@ -134,6 +134,9 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             args.adapter,
             args.output,
             max_new_tokens=args.max_new_tokens,
+            batch_size=args.batch_size,
+            inference_mode=args.inference_mode,
+            wandb_project=args.wandb_project,
         )
     if args.command == "evaluate":
         metrics = evaluate_files(
@@ -269,6 +272,9 @@ def _parser() -> argparse.ArgumentParser:
     predict.add_argument("--adapter", type=Path, required=True)
     predict.add_argument("--output", type=Path, required=True)
     predict.add_argument("--max-new-tokens", type=int, default=4096)
+    predict.add_argument("--batch-size", type=int, default=1)
+    predict.add_argument("--inference-mode", choices=("bf16", "int8"), default="bf16")
+    predict.add_argument("--wandb-project")
 
     evaluate = commands.add_parser("evaluate")
     _evaluation_args(evaluate, require_luna=False)

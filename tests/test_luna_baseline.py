@@ -891,6 +891,55 @@ def test_import_rejects_report_execution_mismatch(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "omitted",
+    [
+        (),
+        ("price_issue_missing_prices",),
+        ("price_issue_currency_only", "price_issue_option_or_price_label_only"),
+        (
+            "price_issue_currency_only",
+            "price_issue_option_or_price_label_only",
+            "price_issue_missing_prices",
+        ),
+    ],
+)
+def test_import_accepts_only_enumerated_complete_document_count_inventories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, omitted: tuple[str, ...]
+) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    _promote_cost_fixture_to_production(dataset, root, run_id, prediction_path, monkeypatch)
+    report_path = root / "evaluation" / run_id / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    counts = report["documents"][0]["counts"]
+    for key in omitted:
+        counts.pop(key)
+    _write_json(report_path, report)
+
+    result = import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+    assert result["examples"] == 1
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_import_rejects_partial_document_count_inventories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy: bool
+) -> None:
+    dataset, root, run_id, prediction_path, _document_id = _fixture(tmp_path)
+    _promote_cost_fixture_to_production(dataset, root, run_id, prediction_path, monkeypatch)
+    report_path = root / "evaluation" / run_id / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    counts = report["documents"][0]["counts"]
+    if legacy:
+        counts.pop("price_issue_currency_only")
+        counts.pop("price_issue_option_or_price_label_only")
+    counts.pop("gold_dishes")
+    _write_json(report_path, report)
+
+    with pytest.raises(ValueError, match="document metrics are malformed"):
+        import_luna_baseline(dataset, root, run_id, tmp_path / "luna.jsonl")
+
+
+@pytest.mark.parametrize(
     ("damage", "message"),
     [
         ("report-extra", "report/run has an unexpected key inventory"),

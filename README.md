@@ -11,6 +11,34 @@ The repository contains code, contracts, and generated synthetic fixtures only.
 Real images, OCR, annotations, predictions, credentials, datasets, adapters, and
 checkpoints must remain outside Git.
 
+## Why this project is interesting
+
+This is an end-to-end, evidence-driven VLM system rather than a training
+notebook. It includes deterministic multimodal dataset compilation, immutable
+split/provenance contracts, Qwen3-VL LoRA fine-tuning, Luna baseline comparison,
+frozen test gates, checksum-bound adapter artifacts, privacy-safe W&B telemetry,
+and cost-bounded Runpod execution.
+
+The latest NVIDIA A40 experiment used BF16 + FlashAttention 2 and batched 16
+robustness examples at a time. On the matched 48-example robustness set it
+increased evaluation capacity **1.85×** versus the pre-FA batch-1 run, reaching
+**36.95 aggregate decode tok/s** while item F1 changed from **0.8212 to 0.8134**.
+Schema validity improved from **91.67% to 93.75%**, but structural F1 fell from
+**0.6780 to 0.3462**—an explicit open investigation, not a hidden tradeoff.
+
+| v9 result | Value |
+|---|---:|
+| Frozen dataset | 500 records |
+| Pre-FA robustness capacity | 0.92 examples/minute |
+| FA2 batch-16 robustness capacity | **1.70 examples/minute** |
+| FA2 observed GPU utilization | 94–99% |
+| FA2 late-decode VRAM | 38.77 GiB / 46.1 GiB usable |
+| Runpod cost confirmed before final billing bucket | $0.38 |
+
+Read the full [v9 engineering and benchmark report](docs/v9-benchmark-report.md)
+for the Luna, pre-FA, and FA2 comparisons, methodology, limitations, and next
+experiments.
+
 ## What is pinned
 
 - Base: `Qwen/Qwen3-VL-4B-Instruct`

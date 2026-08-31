@@ -87,22 +87,25 @@ and [PEFT LoRA interface](https://huggingface.co/docs/peft/en/package_reference/
 
 ## Next experiments
 
-- **Find the structural regression.** Compare the failed menus side by side and
-  check padding, truncation, section assignment, and batch-dependent decoding.
-- **Run a fair speed test.** Benchmark FA2 on/off at batch 1, 2, 4, 8, and 16
-  with the same runtime, menus, and decoding settings.
-- **Try smaller weights.** Test INT8 and 4-bit weight quantization on GPUs with
-  useful low-precision acceleration, then rerun the complete quality suite. A
-  lower-memory weight representation is only a win if item and structural F1
-  hold up.
-- **Batch similar menus together.** Group examples by prompt and expected output
-  length so a short menu does not wait behind a 4,096-token outlier.
-- **Benchmark the real serving shape.** Measure single-menu latency for the app
-  separately from high-throughput offline evaluation, with TTFT, tokens/second,
-  VRAM, and cost per 1,000 menus.
-- **Close the gap to Luna.** Use validation and a dedicated diagnostic split to
-  decide whether the next gain should come from better labels, more data, or
-  different LoRA targets—not just more training steps.
+- **Feed it harder menus.** Add more dense, multilingual, multi-column, low-light,
+  and unusual-price layouts instead of repeating the easy cases we already solve.
+- **Turn mistakes into training data.** Mine validation failures, clean up the
+  labels, and build a focused set for missed headers, merged dishes, split dishes,
+  notes, and section ownership.
+- **Tune what LoRA can learn.** Sweep rank, alpha, learning rate, and target
+  modules; compare language-only adaptation with the multimodal merger and a
+  small, carefully unfrozen slice of the vision encoder.
+- **Teach structure more directly.** Try curriculum training from simple to dense
+  menus and give extra weight to section boundaries, item ownership, and valid
+  JSON—not just token-level imitation.
+- **Learn from the stronger baseline.** Explore human-checked Luna outputs for
+  distillation or pseudo-labeling, especially where Luna finds the right menu
+  structure and the LoRA model does not.
+- **Try a stronger base.** Compare the current 4B checkpoint with newer or larger
+  Qwen-VL variants and measure whether the quality gain is worth the extra GPU
+  cost.
+- **Compress the winner.** Once the best-quality checkpoint is chosen, test INT8
+  and 4-bit weights and keep them only if item, OCR, and structural F1 survive.
 
 ## Local development and synthetic proof
 

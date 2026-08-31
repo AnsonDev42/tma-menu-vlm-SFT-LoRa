@@ -75,12 +75,15 @@ reference baseline and has no local latency/throughput telemetry.
 | Schema-valid rate | 100% | 100% | 91.67% |
 | Parseable rate | 100% | 100% | 91.67% |
 | Recorded throughput | n/a | 16.82 tok/s | 20.73 aggregate decode tok/s |
-| Effective latency | n/a | 55.79 s/example | 62.83 s/example |
+| Mean request latency | n/a | 55.79 s | 125.66 s |
+| Amortized wall time / completed example | n/a | 55.79 s | 62.83 s |
 
 The clean run does **not** support a claim that FA2 improved end-to-end speed or
 preserved accuracy. Aggregate token throughput rose 1.23×, but effective
-examples/second fell about 11%, and several quality metrics regressed. The old
-throughput includes the complete `generate()` call, while the new decode metric
+examples/second fell about 11%, request latency increased, and several quality
+metrics regressed. Amortized wall time is mean batch wall time divided by batch
+size; each request still waits for the full batch. The old throughput includes
+the complete `generate()` call, while the new decode metric
 separates TTFT and excludes the first generated token, so token-rate comparison
 is directional. Output-length variation and batch padding also affect the result.
 
@@ -99,13 +102,16 @@ not evaluated on this robustness inventory, so no Luna column is presented.
 | Schema-valid rate | 91.67% | 93.75% | +2.08 pp |
 | Parseable rate | 91.67% | 93.75% | +2.08 pp |
 | Recorded throughput | 16.51 tok/s | 36.95 aggregate decode tok/s | 2.24× directional |
-| Effective latency | 65.08 s/example | 35.24 s/example | **1.85× capacity** |
+| Mean request latency | 65.08 s | 563.86 s | 8.66× longer |
+| Amortized wall time / completed example | 65.08 s | 35.24 s | **1.85× capacity** |
 
-Batch 16 completed in three batches without OOM and sustained roughly 94–99%
-observed GPU utilization. Framework telemetry reported a 28.29 GB peak; a
-late-decode `nvidia-smi` observation reached 38.77 GiB as the KV cache grew.
-That late peak is the safer capacity signal and argues against blindly increasing
-the batch further.
+Batch 16 completed in three batches without OOM. During the live run, the
+operator observed roughly 94–99% GPU utilization in `nvidia-smi`. Framework
+telemetry reported a 28.29 GB peak; an operator-observed late-decode device
+allocation reached **38,767 MiB (37.86 GiB) of 46,068 MiB (44.99 GiB)** as the
+KV cache grew. These live observations were recorded during the private Runpod
+session rather than derived from the published metric JSON. The late peak is the
+safer capacity signal and argues against blindly increasing the batch further.
 
 The item/OCR changes are small enough to motivate further testing, not to claim
 equivalence. The structural-F1 drop is material and is the main quality concern.
@@ -119,8 +125,9 @@ can distinguish those explanations.
    provenance-aware workflow without committing private data or weights.
 2. Batched FA2 inference can saturate an A40 and nearly double completed
    robustness examples per unit time at batch 16.
-3. GPU occupancy alone is not the objective: TTFT rose to 9.96 seconds and long
-   sequences made each batch wait for its slowest member.
+3. GPU occupancy alone is not the objective: TTFT was 9.96 seconds in the
+   batch-16 robustness run, and long sequences made each batch wait for its
+   slowest member.
 4. Throughput and quality must be reported together. The current evidence shows
    a capacity win alongside a structural-quality regression that remains open.
 5. Operational proof matters: the run used offline W&B telemetry, checksum-bound
@@ -133,7 +140,7 @@ can distinguish those explanations.
 2. Sweep batch 1/2/4/8/16 and report examples/minute, aggregate tokens/second,
    TTFT, peak late-decode VRAM, and every quality metric.
 3. Bucket menus by prompt size and expected output length so short generations
-   do not wait behind 2,048-token outliers.
+   do not wait behind 4,096-token outliers.
 4. Inspect the structural-F1 failures by example and determine whether they come
    from section assignment, truncated JSON, padding, or batch-dependent decoding.
 5. Compare the LoRA errors with Luna on the canonical test set and prioritize

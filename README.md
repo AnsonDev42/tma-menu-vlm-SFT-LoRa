@@ -31,9 +31,13 @@ Schema validity improved from **91.67% to 93.75%**, but structural F1 fell from
 | Frozen dataset | 500 records |
 | Pre-FA robustness capacity | 0.92 examples/minute |
 | FA2 batch-16 robustness capacity | **1.70 examples/minute** |
-| FA2 observed GPU utilization | 94–99% |
-| FA2 late-decode VRAM | 38.77 GiB / 46.1 GiB usable |
-| Runpod cost confirmed before final billing bucket | $0.38 |
+| FA2 operator-observed GPU utilization | 94–99% |
+| FA2 operator-observed late-decode VRAM | 37.86 GiB / 44.99 GiB total |
+| Runpod billing confirmed before final partial hour | $0.38 |
+
+Utilization, device-level memory, and billing are operator observations from the
+private pod session; model-quality and phase-timing values come from the
+retrieved aggregate metric artifacts.
 
 Read the full [v9 engineering and benchmark report](docs/v9-benchmark-report.md)
 for the Luna, pre-FA, and FA2 comparisons, methodology, limitations, and next
